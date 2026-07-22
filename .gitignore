@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+
+appsettings.json
+
+Resources/*
+!Resources/README.txt
+
+dataDownload/*
+!dataDownload/README.txt
