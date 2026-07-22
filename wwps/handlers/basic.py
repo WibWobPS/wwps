@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from aiohttp import web
 
-from .. import config, consts, game_data, managers, utils
+from .. import config, consts, game_data, logging_setup, managers, metrics, utils
 from .. import user_data as manage_data
 from ..dto import TutorialList, common_response_dict, common_response_full
 from ..rows import (YwpUserItem, YwpUserMap, YwpUserYoukai,
@@ -14,6 +14,8 @@ from ..rows import (YwpUserItem, YwpUserMap, YwpUserYoukai,
                     YwpUserDictionary, parser_for)
 from ..table_parser import TableParser
 from ..ywp_user_data import YwpUserData
+
+log = logging_setup.get(__name__)
 
 _unmarshal_cache: dict[str, object] = {}
 
@@ -40,6 +42,8 @@ async def login(request: web.Request) -> web.Response:
     await utils.add_tables_to_response(consts.LOGIN_TABLES_PUNI, resdict, True, gdkey)
     resdict["ywp_user_map"] = str(user_map)
     acc.last_login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    metrics.incr("logins")
+    log.info("login %s", gdkey)
     return utils.encrypted_json(resdict)
 
 
@@ -140,13 +144,16 @@ async def create_user(request: web.Request) -> web.Response:
     await manage_data.update_account(acc)
     try:
         await _register_default_tables(gdkey, userdata)
-    except Exception as ex:
-        print(ex)
+    except Exception:
+        log.error("could not register default tables for %s", gdkey, exc_info=True)
         return web.Response(status=500, text="Internal server error")
     res = common_response_full()
     res["rewardList"] = []
     res["ywp_user_tutorial_list"] = game_data.gamedata_cache["ywp_user_tutorial_list_def"]
     res["ywp_user_data"] = userdata.to_dict()
+    metrics.incr("accounts_created")
+    metrics.event("good", f"new player {userdata.playerName}")
+    log.info("created account %s for %s", acc.character_id, userdata.playerName)
     return utils.encrypted_json(res)
 
 
@@ -192,7 +199,7 @@ async def get_master(request: web.Request) -> web.Response:
         if name in game_data.gamedata_cache:
             master[name] = _unmarshal_or_cache(name, game_data.gamedata_cache[name])
         else:
-            print("warn not foudn : " + name)
+            log.warning("getMaster: unknown table %s", name)
     return utils.encrypted_json(master)
 
 
@@ -281,8 +288,7 @@ async def user_info_refresh(request: web.Request) -> web.Response:
             try:
                 resdict[item] = await manage_data.get_ywp_user(gdkey, item)
             except Exception as ex:
-                print(item)
-                print(ex)
+                log.warning("userInfoRefresh: table %s failed: %s", item, ex)
         return utils.encrypted_json(resdict)
     except Exception:
         return utils.encrypted_json(

@@ -11,6 +11,9 @@ from .. import user_data as manage_data
 from ..dto import common_response_full
 from ..table_parser import TableParser
 from ..ywp_user_data import YwpUserData
+from .. import logging_setup, metrics
+
+log = logging_setup.get(__name__)
 
 
 async def init(request: web.Request) -> web.Response:
@@ -289,7 +292,7 @@ async def init_crystal(request: web.Request) -> web.Response:
                 if tables is not None and "ywp_user_data" in tables:
                     jo["ywp_user_data"] = tables["ywp_user_data"]
     except Exception as ex:
-        print(f"Erreur lors de la récupération des données utilisateur: {ex}")
+        log.warning("crystal menu: could not load user data: %s", ex)
     return utils.encrypted_json(jo)
 
 
@@ -327,7 +330,7 @@ async def _compute_player_total_score(gdkey: str):
                     pass
         return total_stars, total_score
     except Exception as ex:
-        print(f"[ComputePlayerTotalScore] Error for {gdkey}: {ex}")
+        log.warning("could not compute total score for %s: %s", gdkey, ex)
         return 0, 0
 
 
@@ -347,7 +350,7 @@ async def _determine_user_league(gdkey: str) -> int:
             return 4
         return 5
     except Exception as ex:
-        print(f"[DetermineUserLeague] Error for {gdkey}: {ex}")
+        log.warning("could not determine league for %s: %s", gdkey, ex)
         return 5
 
 
@@ -366,10 +369,10 @@ async def init_score_attack(request: web.Request) -> web.Response:
     try:
         resdict["weekSeq"] = _current_week_seq()
         resdict["leagueId"] = await _determine_user_league(gdkey)
-        print(f"[InitScoreAttack] User {gdkey} - WeekSeq: {resdict['weekSeq']}, "
-              f"LeagueId: {resdict['leagueId']}")
+        log.debug("score attack init for %s: week %s league %s", gdkey,
+                  resdict["weekSeq"], resdict["leagueId"])
     except Exception as ex:
-        print(f"[InitScoreAttack] Error processing for {gdkey}: {ex}")
+        log.warning("score attack init failed for %s: %s", gdkey, ex)
         resdict["weekSeq"] = 202538
         resdict["leagueId"] = 5
     return utils.encrypted_json(resdict)

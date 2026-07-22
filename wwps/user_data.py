@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import time
 import uuid
 import zlib
 from collections import defaultdict
 
 import asyncpg
 
-from . import config
+from . import config, logging_setup, metrics
+
+log = logging_setup.get(__name__)
 
 
 class TableNotFoundError(Exception):
@@ -44,11 +47,11 @@ async def initialize():
     global _pool, _flush_task
     try:
         _pool = await asyncpg.create_pool(config.postgres_connection_string)
-    except Exception:
-        print("Couldn't create postgres data source.")
+    except Exception as ex:
+        log.critical("could not create the postgres pool: %s", ex)
         raise SystemExit(1)
     _flush_task = asyncio.create_task(_flush_loop())
-    print("db service started")
+    log.info("database pool ready")
 
 
 async def _flush_loop():
@@ -57,14 +60,29 @@ async def _flush_loop():
             await asyncio.sleep(60)
             await _flush_all_dirty_accounts()
     except asyncio.CancelledError:
-        print("bg flush stopped gracefully")
+        log.info("background flush stopped")
         raise
     except Exception as ex:
-        print(f"Error in background flush loop: {ex}")
+        log.error("background flush loop crashed: %s", ex, exc_info=True)
+        metrics.event("critical", f"flush loop crashed: {ex}")
 
 
 async def _flush_all_dirty_accounts():
-    await asyncio.gather(*(_flush_account(gdkey) for gdkey in list(_account_cache.keys())))
+    started = time.perf_counter()
+    keys = list(_account_cache.keys())
+    await asyncio.gather(*(_flush_account(gdkey) for gdkey in keys))
+    duration = (time.perf_counter() - started) * 1000
+    metrics.gauge("flush_duration_ms", round(duration, 1))
+    metrics.gauge("accounts_cached", len(_account_cache))
+    metrics.gauge("locks_held", len(_account_locks) + len(_device_locks))
+    if keys:
+        log.info("flushed %d cached account(s) in %.0f ms", len(keys), duration)
+
+
+def _release_locks(gdkey: str):
+    lock = _account_locks.get(gdkey)
+    if lock is not None and not lock.locked():
+        _account_locks.pop(gdkey, None)
 
 
 async def _flush_account(gdkey: str):
@@ -76,22 +94,34 @@ async def _flush_account(gdkey: str):
             account.is_dirty = False
             try:
                 await _update_account_no_lock(account)
-                print(f"Saved account. gdkey:{gdkey}")
+                metrics.incr("accounts_saved")
+                log.debug("saved account %s", gdkey)
             except Exception as ex:
                 account.is_dirty = True
-                print(f"Failed to flush account {gdkey}: {ex}")
+                metrics.incr("account_save_failed")
+                log.error("failed to flush account %s: %s", gdkey, ex)
         else:
             _account_cache.pop(gdkey, None)
+    if gdkey not in _account_cache:
+        _release_locks(gdkey)
 
 
 async def shutdown():
     if _flush_task:
         _flush_task.cancel()
     await _flush_all_dirty_accounts()
+    if _pool is not None:
+        await _pool.close()
+
+
+async def get_device_gdkeys(udkey: str) -> list[str] | None:
+    gdkeys = await _pool.fetchval("SELECT gdkeys FROM device WHERE udkey = $1", udkey)
+    return list(gdkeys) if gdkeys is not None else None
 
 
 def _throw_if_cache_full():
     if len(_account_cache) >= config.max_cached_accounts:
+        metrics.incr("server_full_rejections")
         raise ServerFullError()
 
 
@@ -186,6 +216,7 @@ async def set_entire_user_data(gdkey: str, data: dict):
 
 
 async def delete_user(udkey: str, gdkey: str):
+    _invalidate_ownership()
     await _remove_gdkey_from_udkey(udkey, gdkey)
     async with _account_locks[gdkey]:
         await _pool.execute("DELETE FROM account WHERE gdkey = $1", gdkey)
@@ -234,7 +265,13 @@ async def get_last_login_time(gdkey: str) -> str | None:
     return account.last_login_time if account else None
 
 
+def _invalidate_ownership():
+    from . import security
+    security.clear_ownership_cache()
+
+
 async def transfer_gdkeys(udkey_from: str, udkey_to: str):
+    _invalidate_ownership()
     first_key, second_key = sorted((udkey_from, udkey_to))
     async with _device_locks[first_key]:
         ctx = _device_locks[second_key] if second_key != first_key else None
@@ -292,6 +329,7 @@ async def get_gdkeys_from_udkey(udkey: str) -> list[str]:
 
 
 async def add_account_to_device(udkey: str, gdkey: str):
+    _invalidate_ownership()
     async with _device_locks[udkey]:
         await _pool.execute(
             "UPDATE device SET gdkeys = array_append(gdkeys, $1) WHERE udkey = $2",

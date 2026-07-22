@@ -18,7 +18,14 @@ cp appsettings.example.json appsettings.json   # then edit it
 python -m wwps
 ```
 
-Serves on `0.0.0.0:8080`.
+Serves on `0.0.0.0:8080`. A status dashboard is at `/dashboard`.
+
+Run the tests with:
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
 
 You also need to populate `Resources/` with the game's master tables and the
 server-side data files. They were embedded in the C# assembly and were never
@@ -36,6 +43,7 @@ committed, so they are not part of this repository. See
 | [endpoints.md](docs/endpoints.md) | Every route and what it does |
 | [configuration.md](docs/configuration.md) | `appsettings.json`, `Resources/`, deployment |
 | [porting-notes.md](docs/porting-notes.md) | Quirks kept from the C# server, and where the port differs |
+| [operations.md](docs/operations.md) | Security checks, logging, metrics, the status dashboard, and tests |
 
 ## Layout
 
@@ -45,7 +53,12 @@ wwps/            server package
   nhn_crypt.py   request/response cipher
   user_data.py   PostgreSQL + write-back account cache
   managers.py    shared game logic
+  security.py    account ownership and anti-cheat checks
+  metrics.py     in-process metrics registry
+  dashboard.py   status dashboard (HTML + JSON + Prometheus)
+  logging_setup.py  colored structured logging
   handlers/      one module per endpoint family
+tests/           pytest suite
 Database/        schema.sql
 Resources/       game data (you supply this)
 dataDownload/    static files served to the client

@@ -4,6 +4,9 @@ import json
 import os
 
 from . import config
+from . import logging_setup, metrics
+
+log = logging_setup.get(__name__)
 
 gamedata_cache: dict[str, str] = {}
 
@@ -12,8 +15,8 @@ def init():
     gamedata_cache.clear()
     res_dir = config.RESOURCES_DIR
     if not os.path.isdir(res_dir):
-        print(f"WARNING: Resources directory not found at {res_dir}; "
-              "static game tables will be missing.")
+        log.warning("resources directory not found at %s, "
+                    "static game tables will be missing", res_dir)
         return
     for name in os.listdir(res_dir):
         if not name.endswith(".txt"):

@@ -12,6 +12,9 @@ from ..rows import (YwpMstYoukai, YwpMstYoukaiLevel, YwpMstYoukaiLevelOpen,
                     YwpUserYoukaiDeck, YwpUserYoukaiLegendReleaseHistory,
                     YwpUserYoukaiSkill, parser_for)
 from ..ywp_user_data import YwpUserData
+from .. import logging_setup, metrics
+
+log = logging_setup.get(__name__)
 
 
 async def _str_table(gdkey: str, table: str) -> str | None:
@@ -258,7 +261,8 @@ async def level_lock_off(request: web.Request) -> web.Response:
     if userdata.ymoney < price:
         return utils.encrypted_json(consts.msg_box_response(
             "You don't have enough Y-Money.", "Too expensive"))
-    print(f"[LevelLockOff] Calculated price: {price}")
+    log.info("level lock removed for yokai %s, price %d", yokai_id, price)
+    metrics.incr("level_locks_removed")
     userdata.ymoney -= price
     yokai.IsLockedLevel = 0
 

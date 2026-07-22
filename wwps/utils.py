@@ -4,7 +4,9 @@ import json
 
 from aiohttp import web
 
-from . import config, game_data, nhn_crypt, user_data
+from . import config, game_data, logging_setup, metrics, nhn_crypt, user_data
+
+log = logging_setup.get(__name__)
 
 
 def bad_request() -> web.Response:
@@ -18,8 +20,11 @@ def encrypted_json(obj, status: int = 200) -> web.Response:
 
 
 async def read_decrypted_request(request: web.Request) -> dict:
+    from . import security
     body = (await request.read()).decode("utf-8")
-    return json.loads(nhn_crypt.decrypt_request(body))
+    payload = json.loads(nhn_crypt.decrypt_request(body))
+    await security.enforce_ownership(payload, request.path)
+    return payload
 
 
 async def add_tables_to_response(tables, result: dict, is_download_once: bool,
@@ -41,7 +46,8 @@ async def add_tables_to_response(tables, result: dict, is_download_once: bool,
         elif table in game_data.gamedata_cache:
             table_text = game_data.gamedata_cache[table]
         else:
-            print("Table not found: " + table)
+            log.warning("table not found: %s", table)
+            metrics.incr("table_missing")
             continue
 
         if table_text is not None:

@@ -5,6 +5,7 @@ import random
 
 from aiohttp import web
 
+from .. import logging_setup, metrics
 from .. import config, consts, game_data, managers, utils
 from .. import user_data as manage_data
 from ..dto import TutorialList, common_response_full
@@ -13,6 +14,8 @@ from ..rows import (YwpMstYoukai, YwpUserDictionary, YwpUserItem, YwpUserYoukai,
                     YwpUserYoukaiBonusEffect, YwpUserYoukaiSkill, parser_for)
 from ..table_parser import TableParser
 from ..ywp_user_data import YwpUserData
+
+log = logging_setup.get(__name__)
 
 
 class PrizeType:
@@ -353,5 +356,6 @@ async def execute_gacha(request: web.Request) -> web.Response:
     if tutorial_changed:
         res["ywp_user_tutorial_list"] = tutorial_list.serialize()
     await managers.mission_update_progress(gdkey, MissionType.TotalCrank, 1)
+    metrics.incr("gacha_rolls", len(prizes))
     await utils.add_tables_to_response(consts.EXECUTE_GACHA_TABLES, res, True, gdkey)
     return utils.encrypted_json(res)

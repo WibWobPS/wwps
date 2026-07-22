@@ -17,6 +17,9 @@ from .rows import (PuniMstStageItem, StageConditionItem, YwpMstConflate,
                    YwpUserStage, YwpUserYoukai, YwpUserYoukaiBonusEffect,
                    YwpUserYoukaiSkill, parser_for, skill_level_get_befriender_pt)
 from .table_parser import TableParser
+from . import logging_setup, metrics
+
+log = logging_setup.get(__name__)
 
 
 class ConditionType:
@@ -1148,7 +1151,7 @@ async def mission_update_progress(gdkey: str, mission_type: int,
             continue
         if (mst_entry.MissionType == mission_type and mission.IsAppear == 1
                 and mission.MissionCompleteStatus != MissionCompleteStatus.CompleteRewardAcquired):
-            print(f"[*] Checking mission for user ${gdkey}: \"{cfg_item['MissionName']}\".")
+            log.debug("checking mission for %s: %s", gdkey, cfg_item["MissionName"])
             if mission_type in _BASIC_PROGRESS:
                 _basic_progress_check(mission, progress_to_update)
             elif mission_type in _BASIC_PARAM:

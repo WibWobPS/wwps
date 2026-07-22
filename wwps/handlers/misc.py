@@ -11,6 +11,9 @@ from .. import auth, config, consts, game_data, managers, utils
 from .. import user_data as manage_data
 from ..dto import common_response_full
 from ..ywp_user_data import YwpUserData
+from .. import logging_setup, metrics
+
+log = logging_setup.get(__name__)
 
 from .init import init_collect_menu
 
@@ -142,7 +145,7 @@ async def update_goku_menu(request: web.Request) -> web.Response:
                 if tables is not None and "ywp_user_data" in tables:
                     jo["ywp_user_data"] = tables["ywp_user_data"]
     except Exception as ex:
-        print(f"[WARN] PopulateUserData error: {ex}")
+        log.warning("goku menu: could not load user data: %s", ex)
 
     user_menu = []
     if goku_menu_id > 0:
@@ -157,7 +160,7 @@ async def update_goku_menu(request: web.Request) -> web.Response:
                     user_menu.append({"gokuMenuId": goku_menu_id})
             await manage_data.set_ywp_user(gdkey, "ywp_user_goku_menu", user_menu)
     except Exception as ex:
-        print(f"[WARN] UpdateUserGokuMenu error: {ex}")
+        log.warning("goku menu: could not persist menu: %s", ex)
     jo["ywp_user_goku_menu"] = user_menu
 
     intro_release = []
@@ -182,7 +185,7 @@ async def update_goku_menu(request: web.Request) -> web.Response:
                 await manage_data.set_ywp_user(
                     gdkey, "ywp_user_goku_youkai_intro_release", intro_release)
     except Exception as ex:
-        print(f"[WARN] UpdateUserGokuYoukaiIntroRelease error: {ex}")
+        log.warning("goku menu: could not persist intro release: %s", ex)
     jo["ywp_user_goku_youkai_intro_release"] = intro_release
     return utils.encrypted_json(jo)
 

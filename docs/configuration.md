@@ -17,6 +17,13 @@ Loaded once at startup by `config.static_init()` from the repository root. Copy
 | `EmailForAuthMessages` | only for linking | Gmail account used to send the six-digit codes. |
 | `AppPasswordForAuthMessages` | only for linking | Gmail app password for that account. |
 | `SupabaseKey`, `SupabaseURL` | no | Read into config but unused; the Supabase storage path was never implemented. |
+| `Port` | no (8080) | Listen port. |
+| `LogLevel` | no (INFO) | Root log level: DEBUG, INFO, WARNING, ERROR. |
+| `EnforceAccountOwnership` | no (true) | Reject requests whose device does not own the named save. Leave on. |
+| `ValidateBefriend` | no (true) | Reject befriends that were never rolled by `gameStart`. |
+| `MaxScorePerSecond` | no (1000000) | Score ceiling per elapsed battle second, for the anti-cheat check. |
+| `DashboardEnabled` | no (true) | Serve the status dashboard on `/dashboard`. |
+| `DashboardToken` | no | If set, the dashboard requires `?token=…` or an `X-Dashboard-Token` header. |
 
 `appsettings.json` is gitignored because it holds credentials.
 

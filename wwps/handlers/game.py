@@ -7,7 +7,8 @@ from datetime import datetime
 
 from aiohttp import web
 
-from .. import config, consts, game_data, managers, utils
+from .. import (config, consts, game_data, logging_setup, managers, metrics,
+                security, utils)
 from .. import user_data as manage_data
 from ..dto import LotYoukaiInfoList, TutorialList, common_response_full
 from ..managers import MasterStageData, MissionType
@@ -17,6 +18,9 @@ from ..rows import (YwpMstYoukai, YwpMstYoukaiLevel, YwpMstYoukaiLevelOpen,
                     YwpUserYoukaiDeck, YwpUserYoukaiSkill, parser_for)
 from ..table_parser import TableParser
 from ..ywp_user_data import YwpUserData
+from .. import logging_setup, metrics
+
+log = logging_setup.get(__name__)
 
 GAME_END = 0
 GAME_RETIRE = 1
@@ -141,7 +145,6 @@ async def game_start(request: web.Request) -> web.Response:
     req = await utils.read_decrypted_request(request)
     gdkey = req.get("level5UserId")
     stage_id = req.get("stageId", 0)
-    print(stage_id)
     userdata = await YwpUserData.load(gdkey)
     if userdata is None:
         return utils.bad_request()
@@ -278,8 +281,8 @@ async def game_start(request: web.Request) -> web.Response:
         unity_size = unities[mst_item.YoukaiKind]
         multiplier = {2: 10, 3: 20, 4: 25, 5: 30}.get(unity_size, 0)
         if multiplier > 0:
-            print(f"Applied tribe unity bonus for tribe {mst_item.YoukaiKind}: "
-                  f"{multiplier}%.")
+            log.debug("tribe unity bonus for tribe %s: %d%%",
+                      mst_item.YoukaiKind, multiplier)
             yokai["hp"] += yokai["hp"] * multiplier // 100
             yokai["atkPower"] += yokai["atkPower"] * multiplier // 100
 
@@ -305,6 +308,7 @@ async def game_start(request: web.Request) -> web.Response:
     dictionary = TableParser(await _str_table(gdkey, "ywp_user_dictionary"))
     res["ywp_user_dictionary_diff"] = str(dictionary)
     await manage_data.set_ywp_user(gdkey, "ywp_user_requestid", res["requestId"])
+    metrics.incr("battles_started")
     res["ywp_user_data"] = userdata.to_dict()
     await userdata.save(gdkey)
     await utils.add_tables_to_response(consts.GAME_START_TABLES, res, True, gdkey)
@@ -380,7 +384,8 @@ def _handle_stage(req: dict, res: dict, ywp_user_stage, ywp_user_map,
         good = managers.compute_stage_condition(
             cond.ConditionType, req, stage, cond.ConditionVal1, cond.ConditionVal2,
             cond.ConditionVal3)
-        print(f"{temp_condition_id} | {good} | {cond.ConditionType}")
+        log.debug("condition %s type %s -> %s", temp_condition_id,
+                  cond.ConditionType, good)
         if condition_count == 1:
             grd["starGetFlg1"] = 1 if good else 0
         elif condition_count == 2:
@@ -390,7 +395,7 @@ def _handle_stage(req: dict, res: dict, ywp_user_stage, ywp_user_map,
         elif condition_count >= 4 and good:
             new_added_stage = -1
             is_final_stage_map = MasterStageData.get_next_stage(stage_id) == -1
-            print(MasterStageData.get_next_stage(stage_id))
+            pass
             map_index = managers.mst_map_get_index(mst_map, stage_id // 1000)
             if is_final_stage_map and map_index != -1 and \
                     mst_map[map_index].get("reverseMapId", 0) != 0:
@@ -501,14 +506,18 @@ class _YokaiNotOnStage(Exception):
 async def _handle_drop(req: dict, res: dict, dictionary_table, dictionary_diff,
                        user_youkai_table, user_skill_table, user_item_table,
                        player_icon_table_box, userdata: YwpUserData,
-                       level_data: dict, first_clear: int, user_bonus, gdkey: str):
+                       level_data: dict, first_clear: int, user_bonus, gdkey: str,
+                       user_deck=None):
     mst_enemy_param = TableParser(_mst_table_str("ywp_mst_youkai_enemy_param"))
     last_enemies = await manage_data.get_ywp_user(gdkey, "last_enemy") or []
     grd = res["userGameResultData"]
+    pattern = ("00000" if user_deck is None
+               else security.build_lot_pattern(req, user_deck.items[0]))
     for i in req.get("enemyYoukaiResultList") or []:
         enemy_id = i.get("enemyId", 0)
         idx = mst_enemy_param.find_index([str(enemy_id)])
-        if not any(e.get("enemyId") == enemy_id for e in last_enemies):
+        stored = next((e for e in last_enemies if e.get("enemyId") == enemy_id), None)
+        if stored is None:
             raise _YokaiNotOnStage()
         youkai_id = 0
         if idx != -1:
@@ -517,6 +526,13 @@ async def _handle_drop(req: dict, res: dict, dictionary_table, dictionary_diff,
         managers.edit_dictionary(dictionary_diff, youkai_id, True, False)
         if i.get("dropYoukaiFlg") == 1 and youkai_id != 0 \
                 and grd["rewardYoukaiId"] == 0:
+            if not security.befriend_allowed(i, stored, pattern):
+                metrics.incr("cheat_befriend")
+                metrics.event("serious",
+                              f"rejected an unearned befriend of {youkai_id}")
+                log.warning("rejected befriend of %s by %s (pattern %s)",
+                            youkai_id, gdkey, pattern)
+                continue
             res["youkai"] = managers.yokai_won_popup(
                 youkai_id, user_youkai_table, user_skill_table)
             managers.edit_dictionary(dictionary_table, youkai_id, True, True)
@@ -553,8 +569,17 @@ async def game_end(request: web.Request, game_end_type: int = GAME_END) -> web.R
         req["score"] = req.get("score", 0) + 10000
     req_id = await manage_data.get_ywp_user(gdkey, "ywp_user_requestid")
     if not req_id or not req.get("requestId") or req_id != req["requestId"]:
+        metrics.incr("battle_invalid_session")
         return utils.encrypted_json(
             consts.msg_box_response("This session is invalid", "INVALID SESSION"))
+    rejection = security.validate_battle(req, req_id)
+    if rejection is not None:
+        metrics.event("serious", f"rejected a battle result: {rejection}")
+        log.warning("rejected battle result for %s: %s", gdkey, rejection)
+        await manage_data.set_ywp_user(gdkey, "ywp_user_requestid", "")
+        return utils.encrypted_json(
+            consts.msg_box_response("This result could not be verified.",
+                                    "Invalid result"))
     level_data_all = json.loads(game_data.gamedata_cache["stage_data"])
     stage_id = req.get("stageId", 0)
     if str(stage_id) not in level_data_all:
@@ -608,10 +633,12 @@ async def game_end(request: web.Request, game_end_type: int = GAME_END) -> web.R
     if game_end_type == GAME_END:
         first_clear = _handle_stage(req, res, ywp_user_stage, ywp_user_map, level_data)
         try:
+            user_deck = parser_for(YwpUserYoukaiDeck,
+                                   await _str_table(gdkey, "ywp_user_youkai_deck"))
             await _handle_drop(req, res, dictionary_table, dictionary_diff,
                                user_youkai_table, user_skill_table, user_item_table,
                                player_icon_box, userdata, level_data, first_clear,
-                               user_bonus, gdkey)
+                               user_bonus, gdkey, user_deck)
         except _YokaiNotOnStage:
             return utils.encrypted_json(
                 consts.msg_box_response("Yokai not on stage", "Error"))
@@ -679,6 +706,9 @@ async def game_end(request: web.Request, game_end_type: int = GAME_END) -> web.R
     await utils.add_tables_to_response(consts.GAME_END_TABLES, res, True, gdkey)
     response = utils.encrypted_json(res)
     await managers.refresh_ywp_user_friend_rank(gdkey, new_stars, 0)
+    metrics.incr("battles_finished")
+    if grd["rewardYoukaiId"]:
+        metrics.incr("yokai_befriended")
     return response
 
 
@@ -729,7 +759,7 @@ def _build_user_youkai_list(deck_data: str, youkai_data: str) -> list[dict]:
                 })
         return out
     except Exception as ex:
-        print(f"[BuildUserYoukaiList] Error: {ex}")
+        log.warning("could not build the score attack deck: %s", ex)
         return []
 
 
@@ -789,7 +819,7 @@ async def game_start_score_attack(request: web.Request) -> web.Response:
             await utils.add_tables_to_response(tables, res, True, gdkey)
             return utils.encrypted_json(res)
         except Exception as ex:
-            print(f"[StartScoreAttack] Error for {gdkey}: {ex}")
+            log.error("score attack start failed for %s: %s", gdkey, ex)
             return utils.bad_request()
     return utils.encrypted_json(consts.msg_box_response(
         "You don't have enough spirit.", "Not Enough Spirit"))
@@ -948,9 +978,9 @@ async def game_end_score_attack(request: web.Request) -> web.Response:
                   "ywp_user_event_ranking_reward", "ywp_user_friend_star_rank",
                   "ywp_user_friend_rank"]
         await utils.add_tables_to_response(tables, res, True, gdkey)
-        print(f"[GameEndScoreAttack] User {gdkey} finished score attack with score "
-              f"{score} (best: {total_best}, new record: {is_new_record})")
+        log.info("score attack finished for %s: score %d (best %d, record %s)",
+                 gdkey, score, total_best, is_new_record)
         return utils.encrypted_json(res)
     except Exception as ex:
-        print(f"[GameEndScoreAttack] Error for user {gdkey}: {ex}")
+        log.error("score attack end failed for %s: %s", gdkey, ex, exc_info=True)
         return utils.bad_request()

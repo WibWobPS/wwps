@@ -9,3 +9,5 @@ Resources/*
 
 dataDownload/*
 !dataDownload/README.txt
+
+.DS_Store

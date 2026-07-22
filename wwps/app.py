@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import functools
 import re
+import time
 
 from aiohttp import web
 
-from . import auth, config, consts, game_data, utils
+from . import (auth, config, consts, dashboard, game_data, logging_setup,
+               metrics, security, utils)
 from . import user_data as manage_data
 from .handlers import basic, friend, gacha, game, init, l5id, misc, world, yokai
+
+log = logging_setup.get(__name__)
 
 
 def _normalize_path(path: str) -> str:
@@ -28,12 +32,43 @@ async def rewrite_middleware(request: web.Request, handler):
 
 
 @web.middleware
-async def server_full_middleware(request: web.Request, handler):
+async def metrics_middleware(request: web.Request, handler):
+    started = time.perf_counter()
+    failed = False
+    try:
+        response = await handler(request)
+        failed = response.status >= 500
+        return response
+    except Exception:
+        failed = True
+        raise
+    finally:
+        if not request.path.startswith("/dashboard"):
+            metrics.record_request(request.path,
+                                   (time.perf_counter() - started) * 1000, failed)
+
+
+@web.middleware
+async def error_middleware(request: web.Request, handler):
     try:
         return await handler(request)
     except manage_data.ServerFullError:
+        metrics.event("warning", "refused a player, account cache is full")
+        log.warning("server full, refused %s", request.path)
         return utils.encrypted_json(consts.msg_box_response(
             "The server is full.\nPlease try again later.", "Busy"), status=503)
+    except security.OwnershipError as ex:
+        return utils.encrypted_json(consts.msg_box_response(
+            str(ex), "Authentication error"), status=403)
+    except web.HTTPException:
+        raise
+    except Exception as ex:
+        metrics.incr("unhandled_errors")
+        metrics.event("critical", f"{request.path}: {type(ex).__name__}: {ex}")
+        log.error("unhandled error on %s", request.path, exc_info=True)
+        return utils.encrypted_json(consts.msg_box_response(
+            "The server hit an internal error.\nPlease try again.",
+            config.server_name or "Error"), status=500)
 
 
 def _post(app: web.Application, path: str, fn):
@@ -41,7 +76,8 @@ def _post(app: web.Application, path: str, fn):
 
 
 def build_app() -> web.Application:
-    app = web.Application(middlewares=[rewrite_middleware, server_full_middleware])
+    app = web.Application(middlewares=[rewrite_middleware, metrics_middleware,
+                                       error_middleware])
 
     L5ID_BASE = "/api/v1/"
     app.router.add_get("/l5id" + L5ID_BASE + "active", l5id.active_puni)
@@ -49,10 +85,14 @@ def build_app() -> web.Application:
     app.router.add_get(L5ID_BASE + "active.nhn", l5id.active_wibwob)
     app.router.add_get(L5ID_BASE + "create_gdkey.nhn", l5id.create_gdkey)
 
-    app.router.add_post("/auth/link",
-                        lambda r: auth.init_account_action(r, True))
-    app.router.add_post("/auth/restore",
-                        lambda r: auth.init_account_action(r, False))
+    async def _auth_link(r):
+        return await auth.init_account_action(r, True)
+
+    async def _auth_restore(r):
+        return await auth.init_account_action(r, False)
+
+    app.router.add_post("/auth/link", _auth_link)
+    app.router.add_post("/auth/restore", _auth_restore)
     app.router.add_get("/help/inquiry/top.nhn", misc.help_inquiry_top)
 
     _post(app, "/init.nhn", init.init)
@@ -123,6 +163,11 @@ def build_app() -> web.Application:
     _post(app, "/friendRequestAccept.nhn", friend.friend_request_accept)
     _post(app, "/friendDelete.nhn", friend.friend_delete)
 
+    if config.dashboard_enabled:
+        app.router.add_get("/dashboard", dashboard.page)
+        app.router.add_get("/dashboard/data", dashboard.data)
+        app.router.add_get("/dashboard/metrics", dashboard.prometheus)
+
     app.router.add_route("*", "/{tail:.*}", misc.default_handler)
 
     app.on_startup.append(_on_startup)
@@ -132,23 +177,34 @@ def build_app() -> web.Application:
 
 async def _on_startup(app: web.Application):
     await manage_data.initialize()
+    metrics.event("good", "server started")
+    log.info("loaded %d static game table(s)", len(game_data.gamedata_cache))
+    if not config.enforce_account_ownership:
+        log.warning("account ownership checks are disabled")
+    if config.dashboard_enabled:
+        guard = "token required" if config.dashboard_token else "no token set"
+        log.info("dashboard on /dashboard (%s)", guard)
 
 
 async def _on_cleanup(app: web.Application):
-    print("server stopping: flushing accounts")
+    log.info("stopping, flushing accounts")
     try:
         await manage_data.shutdown()
-        print("flush complete")
-    except Exception as ex:
-        print(ex)
+        log.info("flush complete")
+    except Exception:
+        log.error("flush on shutdown failed", exc_info=True)
 
 
 def main(argv: list[str] | None = None):
     config.static_init()
+    logging_setup.configure(config.log_level)
     game_data.init()
+    logging_setup.banner(config.server_name or "WWPS",
+                         config.game_version or "unknown",
+                         config.port, config.is_wibwob)
     app = build_app()
-    web.run_app(app, host="0.0.0.0", port=8080,
-                backlog=config.max_connections)
+    web.run_app(app, host="0.0.0.0", port=config.port,
+                backlog=config.max_connections, print=None)
 
 
 if __name__ == "__main__":

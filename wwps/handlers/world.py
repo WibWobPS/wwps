@@ -8,6 +8,7 @@ from datetime import datetime
 
 from aiohttp import web
 
+from .. import logging_setup, metrics
 from .. import consts, game_data, managers, utils
 from .. import user_data as manage_data
 from ..dto import TutorialList, common_response_full
@@ -18,6 +19,8 @@ from ..rows import (YwpMstItem, YwpMstYoukai, YwpUserItem, YwpUserMap,
                     YwpUserYoukaiBonusEffect, YwpUserYoukaiSkill, parser_for)
 from ..table_parser import TableParser
 from ..ywp_user_data import YwpUserData
+
+log = logging_setup.get(__name__)
 
 UNLOCK_WITH_YMONEY = 1
 UNLOCK_WITH_YOKAI = 2
@@ -480,6 +483,7 @@ async def buy_item(request: web.Request) -> web.Response:
 
     userdata.ymoney -= item.get("price", 0) * goods_count
 
+    metrics.incr("shop_purchases")
     user_items = parser_for(YwpUserItem, await _str_table(gdkey, "ywp_user_item"))
     item_idx = user_items.find_index([str(goods_id)])
     if item_idx == -1:
