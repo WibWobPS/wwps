@@ -11,3 +11,4 @@ dataDownload/*
 !dataDownload/README.txt
 
 .DS_Store
+.secrets_local

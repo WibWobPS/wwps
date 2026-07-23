@@ -323,6 +323,8 @@ async def get_limit_hitodama(request: web.Request) -> web.Response:
 
 async def default_handler(request: web.Request) -> web.Response:
     try:
+        log.warning("unimplemented request: %s %s", request.method, request.path)
+        metrics.incr("unimplemented_requests")
         msg = f"Unimplemented request:\n{request.path}"
         return utils.encrypted_json(
             consts.msg_box_response(msg, config.server_name or "WibWobPS"))

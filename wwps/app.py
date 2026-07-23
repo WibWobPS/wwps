@@ -10,8 +10,8 @@ from aiohttp import web
 from . import (auth, config, consts, dashboard, game_data, logging_setup,
                metrics, security, utils)
 from . import user_data as manage_data
-from .handlers import (admin, basic, friend, gacha, game, init, l5id, misc,
-                       world, yokai)
+from .handlers import (admin, basic, friend, gacha, game, init, l5id,
+                       launching, misc, world, yokai)
 
 log = logging_setup.get(__name__)
 
@@ -98,6 +98,10 @@ def build_app() -> web.Application:
     app.router.add_post("/auth/link", _auth_link)
     app.router.add_post("/auth/restore", _auth_restore)
     app.router.add_get("/help/inquiry/top.nhn", misc.help_inquiry_top)
+
+    app.router.add_route("*", "/hsp", launching.launching)
+    app.router.add_route("*", "/hsp/{tail:.*}", launching.launching)
+    app.router.add_route("*", "/getLaunchingInfos", launching.launching)
 
     _post(app, "/init.nhn", init.init)
     _post(app, "/initBilling.nhn", init.init_billing)
