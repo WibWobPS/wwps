@@ -101,8 +101,38 @@ button {
   padding: 3px 10px; cursor: pointer;
 }
 button:hover { color: var(--text-primary); }
+button.solid { background: var(--series-1); color: #fff; border-color: var(--series-1); }
+button.danger { background: var(--critical); color: #fff; border-color: var(--critical); }
+button.solid:hover, button.danger:hover { color: #fff; filter: brightness(1.1); }
 .panel-head { display: flex; justify-content: space-between; align-items: center; }
 .panel-head h2 { margin-bottom: 12px; }
+input[type=text], input[type=number], input[type=password] {
+  background: var(--surface-0); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 4px;
+  font: inherit; font-size: 13px; padding: 5px 8px;
+}
+.admin-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.admin-row input[type=text] { flex: 1; min-width: 160px; }
+.card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
+        padding: 12px 14px; margin-top: 10px; }
+.card-head { display: flex; justify-content: space-between; align-items: baseline;
+             margin-bottom: 10px; }
+.card-name { font-size: 16px; font-weight: 600; }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+             gap: 8px 16px; margin-bottom: 12px; }
+.card-grid .k { font-size: 11px; color: var(--text-muted); text-transform: uppercase;
+                letter-spacing: .05em; }
+.card-grid .v { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tag { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+       padding: 2px 8px; border-radius: 3px; }
+.tag.banned { background: var(--critical); color: #fff; }
+.tag.active { background: var(--good); color: #fff; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+           border-top: 1px solid var(--border); padding-top: 10px; }
+.actions input { width: 90px; }
+.click-row { cursor: pointer; }
+.click-row:hover td { color: var(--text-primary); background: var(--surface-2); }
+.hint { color: var(--text-muted); font-size: 12px; margin-top: 8px; }
 svg { display: block; width: 100%; height: 150px; overflow: visible; }
 .grid-line { stroke: var(--border); stroke-width: 1; }
 .axis-label { fill: var(--text-muted); font-size: 10px; }
@@ -166,6 +196,22 @@ svg { display: block; width: 100%; height: 150px; overflow: visible; }
     <h2>Counters</h2>
     <div id="counters"></div>
   </div>
+</section>
+
+<section class="panel" style="margin-top: 12px;">
+  <div class="panel-head">
+    <h2>Administration</h2>
+    <span class="sub" id="admin-count"></span>
+  </div>
+  <div class="admin-row">
+    <input type="password" id="admin-token" placeholder="Admin token" autocomplete="off">
+    <input type="text" id="admin-q" placeholder="Search by friend code, user id or name">
+    <button class="solid" id="admin-search">Search</button>
+    <button id="admin-recent">Recent</button>
+  </div>
+  <div id="admin-results"></div>
+  <div id="admin-detail"></div>
+  <p class="hint" id="admin-hint">Set AdminToken in appsettings.json, enter it above, then search.</p>
 </section>
 
 <section class="panel" style="margin-top: 12px;">
@@ -377,6 +423,139 @@ async function poll() {
     document.getElementById('uptime').textContent = 'disconnected';
   }
 }
+const adminToken = () => document.getElementById('admin-token').value.trim();
+
+function adminHeaders() {
+  return adminToken() ? { 'X-Admin-Token': adminToken() } : {};
+}
+
+async function adminFetch(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign(adminHeaders(),
+    opts.body ? { 'Content-Type': 'application/json' } : {});
+  const res = await fetch('/admin' + path, opts);
+  if (res.status === 401) throw new Error('Unauthorized. Check the admin token.');
+  if (res.status === 503) throw new Error('Admin API disabled. Set AdminToken in appsettings.');
+  return res;
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+async function adminSearch(term) {
+  const hint = document.getElementById('admin-hint');
+  const box = document.getElementById('admin-results');
+  document.getElementById('admin-detail').innerHTML = '';
+  try {
+    const res = await adminFetch('/players?q=' + encodeURIComponent(term));
+    const data = await res.json();
+    hint.textContent = '';
+    const rows = data.players || [];
+    if (!rows.length) { box.innerHTML = '<p class="empty">No players match.</p>'; return; }
+    box.innerHTML = '<table><thead><tr><th>Name</th><th>Friend code</th>' +
+      '<th class="num">Y-Money</th><th class="num">Stage</th><th>Status</th></tr></thead><tbody>' +
+      rows.map(p => '<tr class="click-row" data-gd="' + esc(p.gdkey) + '">' +
+        '<td>' + esc(p.playerName || '(unnamed)') + '</td>' +
+        '<td>' + esc(p.characterId) + '</td>' +
+        '<td class="num">' + fmt(p.ymoney || 0) + '</td>' +
+        '<td class="num">' + esc(p.nowStageId || '-') + '</td>' +
+        '<td>' + (p.banned ? '<span class="tag banned">Banned</span>'
+                           : '<span class="tag active">Active</span>') + '</td>' +
+        '</tr>').join('') + '</tbody></table>';
+    box.querySelectorAll('.click-row').forEach(tr =>
+      tr.addEventListener('click', () => adminOpen(tr.dataset.gd)));
+  } catch (err) {
+    hint.textContent = err.message;
+    box.innerHTML = '';
+  }
+}
+
+async function adminOpen(gdkey) {
+  const detail = document.getElementById('admin-detail');
+  try {
+    const res = await adminFetch('/player/' + encodeURIComponent(gdkey));
+    if (!res.ok) { detail.innerHTML = '<p class="empty">Player not found.</p>'; return; }
+    const p = await res.json();
+    const field = (k, v) => '<div><div class="k">' + k + '</div><div class="v">' +
+      esc(v == null ? '-' : v) + '</div></div>';
+    detail.innerHTML =
+      '<div class="card"><div class="card-head">' +
+      '<span class="card-name">' + esc(p.playerName || '(unnamed)') + '</span>' +
+      (p.banned ? '<span class="tag banned">Banned' + (p.banReason ? ': ' +
+        esc(p.banReason) : '') + '</span>' : '<span class="tag active">Active</span>') +
+      '</div>' +
+      '<div class="card-grid">' +
+      field('Friend code', p.characterId) + field('User id', p.userId) +
+      field('Y-Money', fmt(p.ymoney || 0)) + field('Hitodama', p.hitodama) +
+      field('Stage', p.nowStageId) + field('Yo-kai', p.youkaiCount) +
+      field('Items', p.itemCount) + field('Friends', p.friendCount) +
+      field('Last login', p.lastLogin) + '</div>' +
+      '<div class="actions" data-gd="' + esc(gdkey) + '">' +
+      '<input type="number" class="a-ymoney" placeholder="Y-Money" value="0">' +
+      '<input type="number" class="a-hito" placeholder="Hitodama" value="0">' +
+      '<button class="solid a-grant">Grant</button>' +
+      (p.banned ? '<button class="a-unban">Unban</button>'
+                : '<button class="danger a-ban">Ban</button>') +
+      '</div></div>';
+    const actions = detail.querySelector('.actions');
+    actions.querySelector('.a-grant').addEventListener('click', async () => {
+      await adminPost('/grant', { gdkey,
+        ymoney: +actions.querySelector('.a-ymoney').value || 0,
+        hitodama: +actions.querySelector('.a-hito').value || 0 });
+      adminOpen(gdkey);
+    });
+    const banBtn = actions.querySelector('.a-ban');
+    if (banBtn) banBtn.addEventListener('click', async () => {
+      const reason = prompt('Ban reason:', 'cheating');
+      if (reason === null) return;
+      await adminPost('/ban', { gdkey, reason });
+      adminOpen(gdkey); adminSearch(document.getElementById('admin-q').value);
+    });
+    const unbanBtn = actions.querySelector('.a-unban');
+    if (unbanBtn) unbanBtn.addEventListener('click', async () => {
+      await adminPost('/unban', { gdkey });
+      adminOpen(gdkey); adminSearch(document.getElementById('admin-q').value);
+    });
+  } catch (err) {
+    document.getElementById('admin-hint').textContent = err.message;
+  }
+}
+
+async function adminPost(path, body) {
+  const res = await adminFetch(path, { method: 'POST', body: JSON.stringify(body) });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    document.getElementById('admin-hint').textContent = data.error || 'Request failed.';
+  }
+}
+
+async function adminRefreshCount() {
+  if (!adminToken()) return;
+  try {
+    const res = await adminFetch('/stats');
+    if (res.ok) {
+      const s = await res.json();
+      document.getElementById('admin-count').textContent =
+        fmt(s.accounts) + ' accounts, ' + fmt(s.devices) + ' devices, ' +
+        fmt(s.banned) + ' banned';
+    }
+  } catch (err) { /* token not set yet */ }
+}
+
+document.getElementById('admin-search').addEventListener('click', () => {
+  adminSearch(document.getElementById('admin-q').value); adminRefreshCount();
+});
+document.getElementById('admin-recent').addEventListener('click', () => {
+  document.getElementById('admin-q').value = '';
+  adminSearch(''); adminRefreshCount();
+});
+document.getElementById('admin-q').addEventListener('keydown', ev => {
+  if (ev.key === 'Enter') { adminSearch(ev.target.value); adminRefreshCount(); }
+});
+document.getElementById('admin-token').addEventListener('change', adminRefreshCount);
+
 poll();
 setInterval(poll, 2000);
 </script>

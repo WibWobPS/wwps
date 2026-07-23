@@ -23,6 +23,7 @@ validate_befriend: bool = True
 max_score_per_second: int = 1_000_000
 dashboard_enabled: bool = True
 dashboard_token: str | None = None
+admin_token: str | None = None
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESOURCES_DIR = os.path.join(ROOT_DIR, "Resources")
@@ -35,6 +36,7 @@ def static_init(path: str | None = None):
     global game_version, email_for_auth_messages, app_password_for_auth_messages
     global server_name, is_wibwob, port, log_level, enforce_account_ownership
     global validate_befriend, max_score_per_second, dashboard_enabled, dashboard_token
+    global admin_token
 
     path = path or os.path.join(ROOT_DIR, "appsettings.json")
     with open(path, encoding="utf-8") as f:
@@ -56,6 +58,7 @@ def static_init(path: str | None = None):
     max_score_per_second = _try_int(config.get("MaxScorePerSecond"), 1_000_000)
     dashboard_enabled = _try_bool(config.get("DashboardEnabled"), True)
     dashboard_token = config.get("DashboardToken") or None
+    admin_token = config.get("AdminToken") or None
 
     is_wib = config.get("IsWibWob")
     if isinstance(is_wib, bool):

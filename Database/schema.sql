@@ -18,3 +18,8 @@ create table public.mail (
   mail text primary key,
   "currentUdkey" text
 );
+create table public.ban (
+  gdkey text primary key,
+  reason text,
+  banned_at timestamptz default now()
+);

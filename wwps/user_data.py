@@ -350,3 +350,138 @@ async def _update_account_no_lock(account: Account):
         json.dumps(account.ywp_user_tables) if account.ywp_user_tables is not None else None,
         account.last_login_time, str(account.start_date),
         account.opening_tutorial_flag, account.gdkey)
+
+
+_bans: dict[str, str] = {}
+
+
+async def load_bans():
+    _bans.clear()
+    try:
+        rows = await _pool.fetch("SELECT gdkey, reason FROM ban")
+    except asyncpg.UndefinedTableError:
+        await _pool.execute(
+            "CREATE TABLE IF NOT EXISTS ban (gdkey text PRIMARY KEY, "
+            "reason text, banned_at timestamptz DEFAULT now())")
+        rows = []
+    for row in rows:
+        _bans[row["gdkey"]] = row["reason"] or ""
+    metrics.gauge("banned_accounts", len(_bans))
+
+
+def is_banned(gdkey: str) -> bool:
+    return gdkey in _bans
+
+
+def ban_reason(gdkey: str) -> str | None:
+    return _bans.get(gdkey)
+
+
+async def add_ban(gdkey: str, reason: str):
+    await _pool.execute(
+        "INSERT INTO ban (gdkey, reason) VALUES ($1, $2) "
+        "ON CONFLICT (gdkey) DO UPDATE SET reason = EXCLUDED.reason", gdkey, reason)
+    _bans[gdkey] = reason
+    metrics.gauge("banned_accounts", len(_bans))
+
+
+async def remove_ban(gdkey: str) -> bool:
+    result = await _pool.execute("DELETE FROM ban WHERE gdkey = $1", gdkey)
+    existed = _bans.pop(gdkey, None) is not None
+    metrics.gauge("banned_accounts", len(_bans))
+    return existed or result.endswith("1")
+
+
+async def count_accounts() -> int:
+    return await _pool.fetchval("SELECT count(*) FROM account")
+
+
+async def count_devices() -> int:
+    return await _pool.fetchval("SELECT count(*) FROM device")
+
+
+async def search_accounts(term: str, limit: int = 20) -> list[dict]:
+    term = (term or "").strip()
+    if not term:
+        rows = await _pool.fetch(
+            "SELECT gdkey, character_id, user_id, last_lgn_time, "
+            "ywp_user_tables -> 'ywp_user_data' AS data "
+            "FROM account WHERE ywp_user_tables ? 'ywp_user_data' "
+            "ORDER BY last_lgn_time DESC NULLS LAST LIMIT $1", limit)
+    else:
+        rows = await _pool.fetch(
+            "SELECT gdkey, character_id, user_id, last_lgn_time, "
+            "ywp_user_tables -> 'ywp_user_data' AS data FROM account "
+            "WHERE character_id = $1 OR user_id = $1 "
+            "OR ywp_user_tables -> 'ywp_user_data' ->> 'playerName' ILIKE $2 "
+            "ORDER BY last_lgn_time DESC NULLS LAST LIMIT $3",
+            term, f"%{term}%", limit)
+    out = []
+    for row in rows:
+        data = row["data"]
+        if isinstance(data, str):
+            data = json.loads(data)
+        data = data or {}
+        out.append({
+            "gdkey": row["gdkey"],
+            "characterId": row["character_id"],
+            "userId": row["user_id"],
+            "playerName": data.get("playerName"),
+            "ymoney": data.get("ymoney"),
+            "nowStageId": data.get("nowStageId"),
+            "lastLogin": row["last_lgn_time"],
+            "banned": is_banned(row["gdkey"]),
+        })
+    return out
+
+
+async def admin_player_summary(gdkey: str) -> dict | None:
+    account = await get_account_from_gdkey(gdkey)
+    if account is None:
+        return None
+    tables = account.ywp_user_tables or {}
+    data = tables.get("ywp_user_data") or {}
+    counts = {}
+    for table in ("ywp_user_youkai", "ywp_user_item", "ywp_user_friend"):
+        value = tables.get(table)
+        if isinstance(value, str):
+            counts[table] = len([r for r in value.split("*") if r]) if value else 0
+        elif isinstance(value, list):
+            counts[table] = len(value)
+        else:
+            counts[table] = 0
+    return {
+        "gdkey": gdkey,
+        "characterId": account.character_id,
+        "userId": account.user_id,
+        "udkey": account.udkey,
+        "playerName": data.get("playerName"),
+        "ymoney": data.get("ymoney"),
+        "hitodama": data.get("hitodama"),
+        "freeHitodama": data.get("freeHitodama"),
+        "nowStageId": data.get("nowStageId"),
+        "lastLogin": account.last_login_time,
+        "banned": is_banned(gdkey),
+        "banReason": ban_reason(gdkey),
+        "youkaiCount": counts["ywp_user_youkai"],
+        "itemCount": counts["ywp_user_item"],
+        "friendCount": counts["ywp_user_friend"],
+    }
+
+
+async def admin_adjust(gdkey: str, ymoney_delta: int = 0,
+                       hitodama_delta: int = 0) -> dict | None:
+    account = await get_account_from_gdkey(gdkey)
+    if account is None:
+        return None
+    tables = account.ywp_user_tables or {}
+    data = tables.get("ywp_user_data")
+    if not isinstance(data, dict):
+        return None
+    async with _account_locks[gdkey]:
+        if ymoney_delta:
+            data["ymoney"] = max(0, int(data.get("ymoney", 0)) + ymoney_delta)
+        if hitodama_delta:
+            data["hitodama"] = max(0, int(data.get("hitodama", 0)) + hitodama_delta)
+        account.is_dirty = True
+    return {"ymoney": data.get("ymoney"), "hitodama": data.get("hitodama")}

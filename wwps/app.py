@@ -10,7 +10,8 @@ from aiohttp import web
 from . import (auth, config, consts, dashboard, game_data, logging_setup,
                metrics, security, utils)
 from . import user_data as manage_data
-from .handlers import basic, friend, gacha, game, init, l5id, misc, world, yokai
+from .handlers import (admin, basic, friend, gacha, game, init, l5id, misc,
+                       world, yokai)
 
 log = logging_setup.get(__name__)
 
@@ -57,6 +58,9 @@ async def error_middleware(request: web.Request, handler):
         log.warning("server full, refused %s", request.path)
         return utils.encrypted_json(consts.msg_box_response(
             "The server is full.\nPlease try again later.", "Busy"), status=503)
+    except security.BannedError as ex:
+        return utils.encrypted_json(consts.msg_box_response(
+            str(ex), "Account banned"), status=403)
     except security.OwnershipError as ex:
         return utils.encrypted_json(consts.msg_box_response(
             str(ex), "Authentication error"), status=403)
@@ -168,6 +172,13 @@ def build_app() -> web.Application:
         app.router.add_get("/dashboard/data", dashboard.data)
         app.router.add_get("/dashboard/metrics", dashboard.prometheus)
 
+    app.router.add_get("/admin/stats", admin.stats)
+    app.router.add_get("/admin/players", admin.players)
+    app.router.add_get("/admin/player/{gdkey}", admin.player)
+    app.router.add_post("/admin/grant", admin.grant)
+    app.router.add_post("/admin/ban", admin.ban)
+    app.router.add_post("/admin/unban", admin.unban)
+
     app.router.add_route("*", "/{tail:.*}", misc.default_handler)
 
     app.on_startup.append(_on_startup)
@@ -177,6 +188,7 @@ def build_app() -> web.Application:
 
 async def _on_startup(app: web.Application):
     await manage_data.initialize()
+    await manage_data.load_bans()
     metrics.event("good", "server started")
     log.info("loaded %d static game table(s)", len(game_data.gamedata_cache))
     if not config.enforce_account_ownership:

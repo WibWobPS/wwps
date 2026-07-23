@@ -20,6 +20,10 @@ class OwnershipError(Exception):
     pass
 
 
+class BannedError(Exception):
+    pass
+
+
 def clear_ownership_cache():
     _ownership_cache.clear()
 
@@ -60,6 +64,10 @@ async def enforce_ownership(payload: dict, path: str):
     gdkey, udkey = extract_keys(payload)
     if gdkey is None:
         return
+    if manage_data.is_banned(gdkey):
+        metrics.incr("banned_rejected")
+        log.warning("blocked banned account %s on %s", gdkey[:8], path)
+        raise BannedError(manage_data.ban_reason(gdkey) or "This account is banned")
     if udkey is None:
         metrics.incr("auth_missing_device")
         log.warning("no device id sent for gdkey %s on %s", gdkey[:8], path)
