@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 
 from aiohttp import web
 
-from .. import config, consts, game_data, managers, utils
+from .. import config, consts, game_data, logging_setup, managers, metrics, utils
+from . import launching
 from .. import user_data as manage_data
 from ..dto import common_response_full
 from ..table_parser import TableParser
@@ -26,12 +27,15 @@ async def init(request: web.Request) -> web.Response:
         return utils.bad_request()
     if not isinstance(req, dict) or "appVer" not in req:
         return utils.bad_request()
+    logging_setup.get(__name__).info("init from appVer=%s (server expects %s)",
+                                     req.get("appVer"), config.game_version)
     if req["appVer"] != config.game_version:
+        metrics.incr("version_mismatch")
         return utils.encrypted_json(consts.msg_box_response(
             "Game version is not\ncompatible with the server.", config.server_name))
     res = common_response_full()
     res["ywp_mst_version_master"] = game_data.gamedata_cache["ywp_mst_version_master"]
-    res["gameServerUrl"] = consts.OG_GAMESERVER_URL
+    res["gameServerUrl"] = launching._public_base(request)
     res["isEnableSerialCode"] = 1
     res["apkey"] = ""
     res["imgServer"] = config.data_download_url or ""
