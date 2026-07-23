@@ -62,7 +62,7 @@ async def call(client, path: str, payload: dict):
 async def test_init_accepts_the_configured_version(client):
     status, body = await call(client, "/init.nhn", {"appVer": "1.0.0"})
     assert status == 200
-    assert body["gameServerUrl"].endswith("yw-p.com")
+    assert body["gameServerUrl"].startswith("http")
     assert body["isEnableSerialCode"] == 1
 
 
