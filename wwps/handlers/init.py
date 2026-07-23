@@ -38,7 +38,10 @@ async def init(request: web.Request) -> web.Response:
     res["gameServerUrl"] = launching._public_base(request)
     res["isEnableSerialCode"] = 1
     res["apkey"] = ""
-    res["imgServer"] = config.data_download_url or ""
+    img = config.data_download_url
+    if not (img and img.startswith("http")):
+        img = launching._public_base(request) + "/dd"
+    res["imgServer"] = img
     res["dispNoticeFlag"] = 2
     res["noticePageList"] = game_data.deserialize_gamedata("noticePageList")
     res["l5idUrl"] = "l5id"

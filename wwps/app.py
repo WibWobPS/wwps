@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import functools
 import re
 import time
@@ -102,6 +103,9 @@ def build_app() -> web.Application:
     app.router.add_route("*", "/hsp", launching.launching)
     app.router.add_route("*", "/hsp/{tail:.*}", launching.launching)
     app.router.add_route("*", "/getLaunchingInfos", launching.launching)
+
+    if os.path.isdir(config.DATA_DOWNLOAD_DIR):
+        app.router.add_static("/dd/", config.DATA_DOWNLOAD_DIR, show_index=False)
 
     _post(app, "/init.nhn", init.init)
     _post(app, "/initBilling.nhn", init.init_billing)
