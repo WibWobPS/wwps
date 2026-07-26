@@ -100,10 +100,30 @@ game does this too.
 | --- | --- |
 | `friend.nhn` | Friend list, incoming requests and rank lists, with relative timestamps rendered. |
 | `friendSearch.nhn` | Look a player up by friend code. |
-| `friendRequest.nhn` | Send a request. Response code 1 means the sender's list is full, 2 means the target's is. |
+| `friendRequest.nhn` | Send a request. Response code 1 means the sender's list is full, 2 means the target's is. The recipient's pending list is capped at 50, oldest dropped first, so requests cannot be used to inflate another save. |
 | `friendRequestAccept.nhn` | Adds each player to the other's friend list and seeds the three rank lists on both sides. |
 | `friendRequestDelete.nhn` | Decline a request. |
 | `friendDelete.nhn` | Remove a friend from every list on both sides. |
+
+## Operator routes
+
+These are not part of the game protocol and answer plain JSON or HTML.
+
+| Route | Behaviour |
+| --- | --- |
+| `GET /healthz` | 200 while the process serves. Exempt from metrics and rate limiting. |
+| `GET /readyz` | 200 when the database answers and the game tables loaded, 503 with a per-check breakdown otherwise. |
+| `GET /dashboard` | The status page shell. Only registered when `DashboardToken` is set. |
+| `GET /dashboard/data` | Metrics snapshot as JSON. Requires `X-Dashboard-Token`. |
+| `GET /dashboard/metrics` | Prometheus exposition. Requires `X-Dashboard-Token`. |
+| `GET /admin/stats` | Account, device and ban counts. |
+| `GET /admin/players` | Search players by friend code, user id or name. |
+| `GET /admin/player/{gdkey}` | One player's summary. |
+| `POST /admin/grant` | Adjust a save's currencies. |
+| `POST /admin/ban`, `POST /admin/unban` | Ban management. |
+
+Every `/admin` route requires `X-Admin-Token` and is only registered when
+`AdminToken` is set. See [operations.md](operations.md).
 
 ## Fallback
 

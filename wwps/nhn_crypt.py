@@ -28,5 +28,8 @@ def encrypt_response(decrypted_content: str) -> str:
 
 
 def _calc_digest(content: bytes) -> bytes:
-    first = hashlib.sha1(DIGEST_SALT + b' ' + content).digest()
-    return hashlib.sha1(DIGEST_SALT + first).digest()
+    # SHA-1 and the salt are both fixed by the NHN protocol. The digest tells
+    # the client the body arrived intact; it is not a security control.
+    first = hashlib.sha1(DIGEST_SALT + b' ' + content,
+                         usedforsecurity=False).digest()
+    return hashlib.sha1(DIGEST_SALT + first, usedforsecurity=False).digest()

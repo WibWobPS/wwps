@@ -2,16 +2,31 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from aiohttp import web
 
-from .. import config, consts, game_data, logging_setup, managers, metrics, utils
+from .. import (
+    config,
+    consts,
+    game_data,
+    logging_setup,
+    managers,
+    metrics,
+    utils,
+    validate,
+)
 from .. import user_data as manage_data
 from ..dto import TutorialList, common_response_dict, common_response_full
-from ..rows import (YwpUserItem, YwpUserMap, YwpUserYoukai,
-                    YwpUserYoukaiBonusEffect, YwpUserYoukaiSkill,
-                    YwpUserDictionary, parser_for)
+from ..rows import (
+    YwpUserDictionary,
+    YwpUserItem,
+    YwpUserMap,
+    YwpUserYoukai,
+    YwpUserYoukaiBonusEffect,
+    YwpUserYoukaiSkill,
+    parser_for,
+)
 from ..table_parser import TableParser
 from ..ywp_user_data import YwpUserData
 
@@ -25,6 +40,8 @@ async def login(request: web.Request) -> web.Response:
     req = await utils.read_decrypted_request(request)
     gdkey = req.get("gdkeyValue")
     acc = await manage_data.get_account_from_gdkey(gdkey)
+    if acc is None:
+        raise manage_data.MissingAccountError(gdkey)
 
     if await can_do_shrine_today(gdkey):
         await manage_data.set_ywp_user(gdkey, "ywp_user_addition", False)
@@ -43,7 +60,7 @@ async def login(request: web.Request) -> web.Response:
     resdict["ywp_user_map"] = str(user_map)
     acc.last_login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     metrics.incr("logins")
-    log.info("login %s", gdkey)
+    log.info("login %s", logging_setup.mask(gdkey))
     return utils.encrypted_json(resdict)
 
 
@@ -133,10 +150,17 @@ async def create_user(request: web.Request) -> web.Response:
     req = await utils.read_decrypted_request(request)
     gdkey = req.get("level5UserID")
     acc = await manage_data.get_account_from_gdkey(gdkey)
-    icon_id = req.get("iconID", 1)
+    if acc is None:
+        raise manage_data.MissingAccountError(gdkey)
+    icon_id = validate.req_int(req, "iconID", 1, minimum=0, maximum=1_000_000)
     title = 1 if config.is_wibwob else icon_id
+    player_name = validate.clean_name(
+        validate.req_str(req, "playerName", max_length=128))
+    if not player_name:
+        return utils.encrypted_json(consts.msg_box_response(
+            "That name cannot be used.", "Error"))
     userdata = YwpUserData(icon_id=icon_id, title_id=title,
-                           player_name=req.get("playerName", ""))
+                           player_name=player_name)
     acc.start_date = int(time.time() * 1000)
     userdata.characterId = acc.character_id
     userdata.userId = acc.user_id
@@ -145,7 +169,8 @@ async def create_user(request: web.Request) -> web.Response:
     try:
         await _register_default_tables(gdkey, userdata)
     except Exception:
-        log.error("could not register default tables for %s", gdkey, exc_info=True)
+        log.error("could not register default tables for %s",
+                  logging_setup.mask(gdkey), exc_info=True)
         return web.Response(status=500, text="Internal server error")
     res = common_response_full()
     res["rewardList"] = []
@@ -218,7 +243,7 @@ async def _udkey_player_item(gdkey: str) -> dict | None:
     if userdata is None:
         return None
     account = await manage_data.get_account_from_gdkey(gdkey)
-    start = datetime.fromtimestamp(account.start_date / 1000, tz=timezone.utc)
+    start = datetime.fromtimestamp(account.start_date / 1000, tz=UTC)
     return {
         "iconId": userdata.iconId,
         "playerName": userdata.playerName,
@@ -256,6 +281,8 @@ async def delete_user(request: web.Request) -> web.Response:
     req = await utils.read_decrypted_request(request)
     gdkey = req.get("level5UserID")
     userdata = await YwpUserData.load(gdkey)
+    if userdata is None:
+        raise manage_data.MissingAccountError(gdkey)
     if req.get("characterID") == userdata.characterId:
         resp_code = 0
         if req.get("finalAnswerFlg") == 1:
@@ -300,9 +327,14 @@ async def rename(request: web.Request) -> web.Response:
     req = await utils.read_decrypted_request(request)
     gdkey = req.get("level5UserID")
     userdata = await YwpUserData.load(gdkey)
-    new_name = req.get("newPlayerName")
-    if userdata is not None and new_name:
-        userdata.playerName = new_name
+    if userdata is None:
+        raise manage_data.MissingAccountError(gdkey)
+    new_name = validate.clean_name(validate.req_str(req, "newPlayerName",
+                                                    max_length=128))
+    if not new_name:
+        return utils.encrypted_json(consts.msg_box_response(
+            "That name cannot be used.", "Error"))
+    userdata.playerName = new_name
     await managers.refresh_ywp_user_friend(gdkey, -1, -1, userdata.playerName, -1, "")
     res = common_response_full()
     res["ywp_user_data"] = userdata.to_dict()
@@ -311,10 +343,29 @@ async def rename(request: web.Request) -> web.Response:
     return response
 
 
+def _owns_cosmetic(table, value: int) -> bool:
+    """Whether an unlockable id appears in the save's own unlock table.
+
+    The tables are the usual pipe/asterisk rows of ids. A save that has no
+    table at all is left alone rather than locked out of its own profile.
+    """
+    if table is None or table == "":
+        return True
+    if isinstance(table, list):
+        return not table or any(
+            str(entry.get("id", entry)) == str(value) if isinstance(entry, dict)
+            else str(entry) == str(value) for entry in table)
+    if isinstance(table, str):
+        return TableParser(table).find_index([str(value)]) != -1
+    return True
+
+
 async def update_profile(request: web.Request) -> web.Response:
     req = await utils.read_decrypted_request(request)
     gdkey = req.get("level5UserID")
     userdata = await YwpUserData.load(gdkey)
+    if userdata is None:
+        raise manage_data.MissingAccountError(gdkey)
 
     raw_icon = await manage_data.get_ywp_user(gdkey, "ywp_user_player_icon")
     user_player_icon = TableParser(raw_icon if isinstance(raw_icon, str) else None)
@@ -323,19 +374,25 @@ async def update_profile(request: web.Request) -> web.Response:
     user_player_effect = await manage_data.get_ywp_user(gdkey, "ywp_user_player_effect")
     user_player_codename = await manage_data.get_ywp_user(gdkey, "ywp_user_player_codename")
 
-    if req.get("iconID", 0) > 0:
-        if user_player_icon.find_index([str(req["iconID"])]) != -1:
-            userdata.iconId = req["iconID"]
-        else:
+    icon_id = validate.req_int(req, "iconID", minimum=0)
+    if icon_id > 0:
+        if user_player_icon.find_index([str(icon_id)]) == -1:
             return utils.encrypted_json(consts.msg_box_response("Error", "Error"))
-    if req.get("titleID", 0) > 0:
-        userdata.titleId = req["titleID"]
-    if req.get("codenameId", 0) > 0:
-        userdata.codenameId = req["codenameId"]
-    if req.get("effectId", 0) > 0:
-        userdata.effectId = req["effectId"]
-    if req.get("plateId", 0) > 0:
-        userdata.plateId = req["plateId"]
+        userdata.iconId = icon_id
+
+    # Everything else on the profile is cosmetic but still has to be something
+    # the save actually owns, otherwise any client can equip any of them.
+    for field, attribute, owned in (
+            ("titleID", "titleId", user_player_title),
+            ("codenameId", "codenameId", user_player_codename),
+            ("effectId", "effectId", user_player_effect),
+            ("plateId", "plateId", user_player_plate)):
+        value = validate.req_int(req, field, minimum=0)
+        if value <= 0:
+            continue
+        if not _owns_cosmetic(owned, value):
+            return utils.encrypted_json(consts.msg_box_response("Error", "Error"))
+        setattr(userdata, attribute, value)
     await userdata.save(gdkey)
     res = common_response_full()
     res["ywp_user_player_icon"] = str(user_player_icon)

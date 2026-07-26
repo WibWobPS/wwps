@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from aiohttp import web
 
 from .. import config, consts, game_data, logging_setup, managers, metrics, utils
-from . import launching
 from .. import user_data as manage_data
 from ..dto import common_response_full
 from ..table_parser import TableParser
 from ..ywp_user_data import YwpUserData
-from .. import logging_setup, metrics
+from . import launching
 
 log = logging_setup.get(__name__)
 
@@ -231,7 +230,7 @@ def _crystal_datetime(year, month, day, hour=0, minute=0, second=0) -> dict:
         day_of_week = 5
     else:
         dt = datetime(year, month, day, hour, minute, second)
-        unix_time = int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+        unix_time = int(dt.replace(tzinfo=UTC).timestamp() * 1000)
         day_of_week = (dt.weekday() + 1) % 7
     return {"date": day, "day": day_of_week, "hours": hour, "minutes": minute,
             "month": month - 1, "seconds": second, "time": unix_time,

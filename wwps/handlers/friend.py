@@ -9,6 +9,8 @@ from .. import user_data as manage_data
 from ..dto import common_response_full
 from ..ywp_user_data import YwpUserData
 
+MAX_PENDING_REQUESTS = 50
+
 
 async def _list(gdkey: str, table: str) -> list:
     return await manage_data.get_ywp_user(gdkey, table) or []
@@ -89,6 +91,11 @@ async def friend_request(request: web.Request) -> web.Response:
                         break
                 while len(target_friends) >= 50:
                     target_friends.pop(0)
+                # The recipient does not choose who writes here, so the oldest
+                # pending requests are dropped rather than letting anyone grow
+                # another player's save without limit.
+                while len(target_reqs) >= MAX_PENDING_REQUESTS:
+                    target_reqs.pop(0)
                 target_reqs.append({
                     "playerName": my.playerName,
                     "requestDt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -164,6 +171,12 @@ async def friend_request_accept(request: web.Request) -> web.Response:
     res = common_response_full()
     my = await YwpUserData.load(gdkey)
     tgdkey = await manage_data.get_gdkey_from_user_id(target_user_id or "")
+    if my is None or not tgdkey:
+        res["responseCode"] = 1
+        res["ywp_user_friend"] = None
+        res["ywp_user_friend_request_recv"] = await _list(
+            gdkey, "ywp_user_friend_request_recv")
+        return utils.encrypted_json(res)
     target_reqs = await _list(tgdkey, "ywp_user_friend_request_recv")
     my_reqs = await _list(gdkey, "ywp_user_friend_request_recv")
     res["ywp_user_friend_request_recv"] = my_reqs

@@ -12,11 +12,15 @@ game client
     |  HTTP POST /login.nhn   (body = base64url AES blob)
     v
 aiohttp app  (wwps/app.py)
-    |  rewrite_middleware        normalize the path
-    |  server_full_middleware    turn ServerFullError into a 503 dialog
+    |  rewrite_middleware            normalize the path
+    |  ratelimit.middleware          per-client token buckets
+    |  security_headers_middleware   nosniff, no-referrer
+    |  metrics_middleware            count and time by matched route
+    |  save_lock_middleware          release the per-save lock
+    |  error_middleware              turn known errors into client dialogs
     v
 handler  (wwps/handlers/*.py)
-    |  utils.read_decrypted_request  ->  dict
+    |  utils.read_decrypted_request  ->  dict (ownership check, save lock)
     |  game_data.gamedata_cache      ->  static master tables (Resources/*.txt)
     |  user_data.get_ywp_user        ->  per-player tables (account cache)
     |  managers.*                    ->  shared game rules
@@ -29,7 +33,7 @@ utils.encrypted_json(dict)  ->  base64url AES blob
 | Module | Responsibility |
 | --- | --- |
 | `wwps/app.py` | Route table, middlewares, startup/shutdown hooks, `main()` |
-| `wwps/config.py` | Loads `appsettings.json` into module-level globals |
+| `wwps/config.py` | Loads `appsettings.json` and `WWPS_*` environment overrides into module-level globals, and validates them |
 | `wwps/nhn_crypt.py` | The NHN request/response cipher |
 | `wwps/utils.py` | Request decoding, response encoding, `add_tables_to_response` |
 | `wwps/game_data.py` | Static master data cache, loaded from `Resources/*.txt` |
@@ -41,6 +45,13 @@ utils.encrypted_json(dict)  ->  base64url AES blob
 | `wwps/consts.py` | Table name lists and the message-box response shape |
 | `wwps/managers.py` | Shared game logic used by more than one endpoint |
 | `wwps/auth.py` | Email-code account linking (the custom auth flow) |
+| `wwps/security.py` | Account ownership, ban checks, battle and befriend validation |
+| `wwps/ratelimit.py` | Per-client token buckets, strict on authentication and admin routes |
+| `wwps/validate.py` | Typed, bounded reads of client-supplied fields |
+| `wwps/rng.py` | The system entropy source used for every roll a player benefits from |
+| `wwps/metrics.py` | In-process counters, gauges, latency and events |
+| `wwps/dashboard.py` | Status page, JSON snapshot and Prometheus exposition |
+| `wwps/logging_setup.py` | Logger configuration and credential masking |
 | `wwps/handlers/` | One module per endpoint family |
 
 ### Handler modules
@@ -67,33 +78,47 @@ utils.encrypted_json(dict)  ->  base64url AES blob
 
 2. **Decryption.** `utils.read_decrypted_request` reads the whole body, runs it
    through `nhn_crypt.decrypt_request`, and parses the resulting JSON into a
-   `dict`. Handlers work with raw wire keys (`level5UserId`, `stageId`, …)
-   rather than typed request objects.
+   `dict`. A body that does not decode raises `MalformedRequestError`, which the
+   error middleware turns into a 400. Handlers work with raw wire keys
+   (`level5UserId`, `stageId`, …) rather than typed request objects, reading
+   anything used in arithmetic through `wwps/validate.py`.
 
-3. **Data access.** Static master tables come from `game_data.gamedata_cache`,
+3. **Ownership and serialization.** Still inside `read_decrypted_request`,
+   `security.enforce_ownership` rejects banned saves and saves the calling
+   device does not own, then the request takes that save's lock. Requests for
+   one save run one at a time; requests for different saves do not block each
+   other. `save_lock_middleware` releases it once the response is written.
+
+4. **Data access.** Static master tables come from `game_data.gamedata_cache`,
    which is a plain dict populated once at startup. Player tables come from
    `user_data`, which serves them out of the account cache.
 
-4. **Response.** Handlers build a `dict`, usually starting from
+5. **Response.** Handlers build a `dict`, usually starting from
    `dto.common_response_full()` or `dto.common_response_dict()`, then
    `utils.encrypted_json` serializes, compresses, encrypts and returns it with
    `Content-Type: application/json`.
 
-5. **Errors.** Game-visible failures are returned as message-box responses
-   (`consts.msg_box_response`) with HTTP 200 — the client renders them as an
-   in-game dialog. Only malformed requests return HTTP 400 via
-   `utils.bad_request()`.
+6. **Errors.** Game-visible failures are returned as message-box responses
+   (`consts.msg_box_response`) — the client renders them as an in-game dialog.
+   `error_middleware` maps the typed exceptions to those dialogs with a matching
+   status: banned and ownership failures 403, invalid input 400, an unknown save
+   404, a full cache 503. A body that cannot be decoded at all returns a plain
+   400.
 
 ## Startup and shutdown
 
 `main()` performs three steps in order:
 
-1. `config.static_init()` reads `appsettings.json`. A missing or non-boolean
-   `IsWibWob` is fatal.
+1. `config.load_or_exit()` reads `appsettings.json` and the `WWPS_*`
+   environment overrides, then validates them. Anything unusable — no database
+   DSN, a missing `IsWibWob`, a port out of range — prints one line and exits.
 2. `game_data.init()` loads every `Resources/*.txt` file into memory, keyed by
    file name without the extension.
-3. `web.run_app` starts the server; the `on_startup` hook opens the asyncpg pool
-   and starts the flush loop.
+3. `web.run_app` starts the server; the `on_startup` hook opens the asyncpg
+   pool, loads the ban list, ensures the audit table exists and starts the
+   flush loop. The dashboard and admin routes are only registered when their
+   tokens are configured, and startup logs which of them are off.
 
 On shutdown the `on_cleanup` hook cancels the flush task and writes every dirty
-account back to PostgreSQL, so a clean stop never loses progress.
+account back to PostgreSQL within a 30 second budget, so a clean stop never
+loses progress.

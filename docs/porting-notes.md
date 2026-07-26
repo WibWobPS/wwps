@@ -98,6 +98,36 @@ stored saves and wire payloads stay compatible.
 `NonRecursiveConverter` JSON base class and a no-op middleware were not ported;
 nothing referenced them.
 
+## Deliberate departures from the C# server
+
+These change observable behaviour, and all of them are security fixes rather
+than porting accidents.
+
+- **Account codes expire and lock out.** The C# flow stored an expiry and never
+  checked it. Codes now expire after fifteen minutes, are drawn from a
+  cryptographic source, and five wrong guesses lock a device out.
+- **Device save limit is enforced.** `max_gdkeys: 3` was advertised to the
+  client and enforced nowhere; `create_gdkey` now refuses beyond
+  `MaxGdkeysPerDevice` and requires a device that exists.
+- **One request at a time per save.** Requests naming the same save are
+  serialized. The C# server allowed them to interleave, which let a client
+  duplicate currency by firing purchases in parallel.
+- **Profile fields are checked against the save's unlock tables.** Only the icon
+  was validated before; titles, plates, effects and codenames are now checked
+  the same way when the save has the corresponding table.
+- **Player names are stripped of `|` and `*`** and length-capped, because those
+  are the delimiters of the save-table format itself.
+- **Score ceilings are much tighter.** `MaxScorePerSecond` defaults to 20000
+  rather than 1000000, and the flat grace fell from a million to a hundred
+  thousand.
+- **Rolls use system entropy.** Gacha, drops and befriend rolls previously came
+  from a seeded Mersenne Twister whose stream can be reconstructed from enough
+  observed output.
+
+`gameRetire` still pays out the money the reported score earns, as in the C#
+server; the session token and score ceiling bound it the same way `gameEnd` is
+bounded.
+
 ## Verifying a change
 
 The cipher can be checked against the client-side implementation in

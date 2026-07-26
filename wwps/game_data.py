@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 import os
 
-from . import config
-from . import logging_setup, metrics
+from . import config, logging_setup
 
 log = logging_setup.get(__name__)
 

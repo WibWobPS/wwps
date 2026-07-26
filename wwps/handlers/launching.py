@@ -26,13 +26,19 @@ def _load_template() -> str | None:
 
 
 def _public_base(request: web.Request) -> str:
+    """The base URL handed to the client for its asset and API calls.
+
+    Forwarded headers decide where players' clients will send everything that
+    follows, so they are only believed when the operator has said a proxy sits
+    in front of this server.
+    """
     if config.public_url:
         return config.public_url.rstrip("/")
-    proto = request.headers.get("X-Forwarded-Proto")
-    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host")
-    if host:
-        scheme = proto or request.scheme
-        return f"{scheme}://{host}".rstrip("/")
+    if config.trust_proxy_headers:
+        proto = request.headers.get("X-Forwarded-Proto")
+        host = request.headers.get("X-Forwarded-Host")
+        if host:
+            return f"{proto or request.scheme}://{host.split(',')[0].strip()}".rstrip("/")
     return str(request.url.origin()).rstrip("/")
 
 
@@ -63,6 +69,5 @@ async def launching(request: web.Request) -> web.Response:
         body = _force_https(body)
     body = _freshen(body)
     metrics.incr("launching_served")
-    log.info("served launching info to %s (base %s)",
-             request.remote or "?", base)
+    log.debug("served launching info to %s (base %s)", request.remote or "?", base)
     return web.Response(text=body, content_type="application/json")

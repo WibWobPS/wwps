@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wwps}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-wwps}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wwps} -d ${POSTGRES_DB:-wwps}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  server:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      WWPS_POSTGRES_CONNECTION_STRING: postgresql://${POSTGRES_USER:-wwps}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-wwps}
+      WWPS_IS_WIB_WOB: ${WWPS_IS_WIB_WOB:-true}
+      WWPS_SERVER_NAME: ${WWPS_SERVER_NAME:-WibWobPS}
+      WWPS_GAME_VERSION: ${WWPS_GAME_VERSION:-1.0.0}
+      WWPS_PORT: 8080
+      WWPS_LOG_LEVEL: ${WWPS_LOG_LEVEL:-INFO}
+      WWPS_PUBLIC_URL: ${WWPS_PUBLIC_URL:-}
+      WWPS_DATA_DOWNLOAD_URL: ${WWPS_DATA_DOWNLOAD_URL:-}
+      WWPS_DASHBOARD_ENABLED: ${WWPS_DASHBOARD_ENABLED:-true}
+      WWPS_DASHBOARD_TOKEN: ${WWPS_DASHBOARD_TOKEN:-}
+      WWPS_ADMIN_TOKEN: ${WWPS_ADMIN_TOKEN:-}
+      WWPS_TRUST_PROXY_HEADERS: ${WWPS_TRUST_PROXY_HEADERS:-false}
+      WWPS_ENFORCE_ACCOUNT_OWNERSHIP: ${WWPS_ENFORCE_ACCOUNT_OWNERSHIP:-true}
+      WWPS_VALIDATE_BEFRIEND: ${WWPS_VALIDATE_BEFRIEND:-true}
+      WWPS_RATE_LIMIT_ENABLED: ${WWPS_RATE_LIMIT_ENABLED:-true}
+      WWPS_EMAIL_FOR_AUTH_MESSAGES: ${WWPS_EMAIL_FOR_AUTH_MESSAGES:-}
+      WWPS_APP_PASSWORD_FOR_AUTH_MESSAGES: ${WWPS_APP_PASSWORD_FOR_AUTH_MESSAGES:-}
+    ports:
+      - "${WWPS_BIND:-0.0.0.0:8080}:8080"
+    volumes:
+      # Game tables and client downloads are supplied by the operator; see
+      # docs/configuration.md.
+      - ./Resources:/app/Resources:ro
+      - ./dataDownload:/app/dataDownload:ro
+
+volumes:
+  postgres-data:

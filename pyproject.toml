@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wwps"
+version = "1.0.0"
+description = "A private server for Yo-kai Watch Puni Puni / Wibble Wobble"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: AsyncIO",
+    "Topic :: Games/Entertainment",
+]
+dependencies = [
+    "aiohttp>=3.9",
+    "asyncpg>=0.29",
+    "pycryptodomex>=3.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+wwps = "wwps.app:main"
+
+[project.urls]
+Source = "https://github.com/WibWobPS/wwps"
+
+[tool.setuptools.packages.find]
+include = ["wwps*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = [
+    "B008",    # aiohttp handlers legitimately build defaults in call position
+    "E501",    # long lines are reported by the formatter, not the linter
+    "E702",    # the constant blocks in managers.py are written one line per group
+    "S101",    # assert is how the tests are written
+    "S104",    # binding 0.0.0.0 is what a game server is for
+    "S324",    # SHA-1 is the NHN protocol's digest, not a security choice
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S311"]
+"Tools/*" = ["S", "B", "E", "F", "I", "UP", "W"]
+"wwps/dashboard.py" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["wwps"]

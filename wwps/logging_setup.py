@@ -81,6 +81,19 @@ def get(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
+def mask(value, keep: int = 8) -> str:
+    """Shorten a gdkey, udkey or address so logs never carry a whole credential."""
+    if not value:
+        return "-"
+    text = str(value)
+    if "@" in text:
+        name, _, domain = text.partition("@")
+        return f"{name[:2]}***@{domain}"
+    if len(text) <= keep:
+        return text
+    return f"{text[:keep]}..."
+
+
 def banner(server_name: str, version: str, port: int, wibwob: bool):
     color = _supports_color(sys.stdout)
     title = f"{server_name} ({'Wibble Wobble' if wibwob else 'Puni Puni'})"

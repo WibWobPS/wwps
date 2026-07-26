@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
-import random
 
 from aiohttp import web
 
-from .. import logging_setup, metrics
-from .. import config, consts, game_data, managers, utils
+from .. import config, consts, game_data, logging_setup, managers, metrics, utils
 from .. import user_data as manage_data
 from ..dto import TutorialList, common_response_full
 from ..managers import MissionType, RarityType, YokaiGetType
-from ..rows import (YwpMstYoukai, YwpUserDictionary, YwpUserItem, YwpUserYoukai,
-                    YwpUserYoukaiBonusEffect, YwpUserYoukaiSkill, parser_for)
+from ..rng import rng
+from ..rows import (
+    YwpMstYoukai,
+    YwpUserDictionary,
+    YwpUserItem,
+    YwpUserYoukai,
+    YwpUserYoukaiBonusEffect,
+    YwpUserYoukaiSkill,
+    parser_for,
+)
 from ..table_parser import TableParser
 from ..ywp_user_data import YwpUserData
 
@@ -108,14 +114,14 @@ def _register_item(user_item_table, result_item: int) -> dict:
 
 def _pick_yokai(yokais: list, rate_up: dict | None):
     if not rate_up:
-        return random.choice(yokais)
+        return rng.choice(yokais)
     weights = [rate_up.get(str(y), rate_up.get(y, 1.0)) for y in yokais]
     total = sum(weights)
     if total <= 0:
-        return random.choice(yokais)
-    roll = random.random() * total
+        return rng.choice(yokais)
+    roll = rng.random() * total
     cumulative = 0.0
-    for y, w in zip(yokais, weights):
+    for y, w in zip(yokais, weights, strict=True):
         cumulative += w
         if roll <= cumulative:
             return y
@@ -125,7 +131,7 @@ def _pick_yokai(yokais: list, rate_up: dict | None):
 def _roll_pool(weights: dict, gacha_id: int, excluded: set | None = None):
     if not excluded:
         total = _weight_sum_cache.setdefault(gacha_id, sum(weights.values()))
-        roll = random.random() * total
+        roll = rng.random() * total
         cumulative = 0.0
         for key, w in weights.items():
             cumulative += w
@@ -135,7 +141,7 @@ def _roll_pool(weights: dict, gacha_id: int, excluded: set | None = None):
     total = sum(w for k, w in weights.items() if k not in excluded)
     if total <= 0:
         return None
-    roll = random.random() * total
+    roll = rng.random() * total
     cumulative = 0.0
     last = None
     for key, w in weights.items():
@@ -183,7 +189,7 @@ async def crank_reward(gacha_id: int, user_yokai, user_skill, user_dict,
                                         last_maxed_rank)
         if pool.startswith("i"):
             items_to_roll = gacha["items"][pool]
-            result_item = random.choice(items_to_roll)
+            result_item = rng.choice(items_to_roll)
             item_won = _register_item(user_item, result_item)
             return {
                 "youkai": None, "icon": None, "ymoney": None,
@@ -265,17 +271,24 @@ async def execute_gacha(request: web.Request) -> web.Response:
     items_mst = TableParser(json.loads(
         game_data.gamedata_cache["ywp_mst_item"])["tableData"])
 
-    gacha_index = managers.get_table_index(gacha_mst, [(0, str(gacha_id))])
-    if config.is_wibwob:
-        pull_count = 1
-    else:
-        pull_count = int(gacha_mst.table[gacha_index][11])
-    price_type = int(gacha_mst.table[gacha_index][3])
-    price_id = int(gacha_mst.table[gacha_index][4])
-    price_num = int(gacha_mst.table[gacha_index][5])
-
     def err():
         return utils.encrypted_json(consts.msg_box_response("Error occured", "Error"))
+
+    gacha_index = managers.get_table_index(gacha_mst, [(0, str(gacha_id))])
+    if gacha_index < 0:
+        return utils.encrypted_json(consts.msg_box_response(
+            f"No pool data exists for:\ngachaId:{gacha_id}", "Error"))
+    try:
+        row = gacha_mst.table[gacha_index]
+        pull_count = 1 if config.is_wibwob else int(row[11])
+        price_type = int(row[3])
+        price_id = int(row[4])
+        price_num = int(row[5])
+    except (IndexError, ValueError):
+        log.error("malformed ywp_mst_gacha row for gachaId %s", gacha_id)
+        return err()
+    if userdata is None:
+        return err()
 
     if price_type == 1:
         if userdata.ymoney - price_num < 0:

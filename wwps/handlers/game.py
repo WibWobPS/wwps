@@ -1,29 +1,47 @@
 from __future__ import annotations
 
 import json
-import math
 import time
 from datetime import datetime
 
 from aiohttp import web
 
-from .. import (config, consts, game_data, logging_setup, managers, metrics,
-                security, utils)
+from .. import (
+    consts,
+    game_data,
+    logging_setup,
+    managers,
+    metrics,
+    security,
+    utils,
+    validate,
+)
 from .. import user_data as manage_data
 from ..dto import LotYoukaiInfoList, TutorialList, common_response_full
 from ..managers import MasterStageData, MissionType
-from ..rows import (YwpMstYoukai, YwpMstYoukaiLevel, YwpMstYoukaiLevelOpen,
-                    YwpUserDictionary, YwpUserItem, YwpUserMap, YwpUserMenufunc,
-                    YwpUserStage, YwpUserYoukai, YwpUserYoukaiBonusEffect,
-                    YwpUserYoukaiDeck, YwpUserYoukaiSkill, parser_for)
+from ..rows import (
+    YwpMstYoukai,
+    YwpUserDictionary,
+    YwpUserItem,
+    YwpUserMap,
+    YwpUserMenufunc,
+    YwpUserStage,
+    YwpUserYoukai,
+    YwpUserYoukaiBonusEffect,
+    YwpUserYoukaiDeck,
+    YwpUserYoukaiSkill,
+    parser_for,
+)
 from ..table_parser import TableParser
 from ..ywp_user_data import YwpUserData
-from .. import logging_setup, metrics
 
 log = logging_setup.get(__name__)
 
 GAME_END = 0
 GAME_RETIRE = 1
+
+MAX_SCORE = 1_000_000_000
+MAX_CLEAR_TIME = 86_400
 
 
 async def _str_table(gdkey: str, table: str) -> str | None:
@@ -260,6 +278,9 @@ async def game_start(request: web.Request) -> web.Response:
             item["skillLv"] = user_skill.items[skill_idx].Level
         res["userYoukaiList"].append(item)
 
+    if not user_deck.items:
+        return utils.encrypted_json(consts.msg_box_response(
+            "Your team is empty.\nPick your Yo-kai first.", "Error"))
     deck = user_deck.items[0]
     for yid in (deck.MiddleYoukaiId, deck.MiddleLeftYoukaiId,
                 deck.MiddleRightYoukaiId, deck.FarLeftYoukaiId,
@@ -511,7 +532,7 @@ async def _handle_drop(req: dict, res: dict, dictionary_table, dictionary_diff,
     mst_enemy_param = TableParser(_mst_table_str("ywp_mst_youkai_enemy_param"))
     last_enemies = await manage_data.get_ywp_user(gdkey, "last_enemy") or []
     grd = res["userGameResultData"]
-    pattern = ("00000" if user_deck is None
+    pattern = ("00000" if user_deck is None or not user_deck.items
                else security.build_lot_pattern(req, user_deck.items[0]))
     for i in req.get("enemyYoukaiResultList") or []:
         enemy_id = i.get("enemyId", 0)
@@ -565,8 +586,11 @@ async def game_end(request: web.Request, game_end_type: int = GAME_END) -> web.R
     gdkey = req.get("level5UserId")
     if not req:
         return utils.bad_request()
+    req["score"] = validate.req_int(req, "score", minimum=0, maximum=MAX_SCORE)
+    req["clearTimeSec"] = validate.req_int(req, "clearTimeSec", minimum=0,
+                                           maximum=MAX_CLEAR_TIME)
     if game_end_type == GAME_END:
-        req["score"] = req.get("score", 0) + 10000
+        req["score"] += 10000
     req_id = await manage_data.get_ywp_user(gdkey, "ywp_user_requestid")
     if not req_id or not req.get("requestId") or req_id != req["requestId"]:
         metrics.incr("battle_invalid_session")
@@ -589,7 +613,6 @@ async def game_end(request: web.Request, game_end_type: int = GAME_END) -> web.R
     if userdata is None:
         return utils.bad_request()
 
-    youkai_diff = parser_for(YwpUserYoukai, "")
     dictionary_diff = parser_for(YwpUserDictionary, "")
     res = _game_end_response_base()
     grd = res["userGameResultData"]
@@ -962,8 +985,8 @@ async def game_end_score_attack(request: web.Request) -> web.Response:
         await userdata.save(gdkey)
         try:
             await manage_data.set_ywp_user(gdkey, f"sa_continues_{req['requestId']}", 0)
-        except Exception:
-            pass
+        except Exception as ex:
+            log.debug("could not reset the score attack continue counter: %s", ex)
 
         tables = ["ywp_user_youkai", "ywp_user_tutorial_list",
                   "ywp_user_youkai_bonus_effect", "ywp_user_event",

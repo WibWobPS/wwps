@@ -1,22 +1,30 @@
 from __future__ import annotations
 
 import json
-import math
-import random
 import time
 from datetime import datetime
 
 from aiohttp import web
 
-from .. import logging_setup, metrics
-from .. import consts, game_data, managers, utils
+from .. import consts, game_data, logging_setup, managers, metrics, utils, validate
 from .. import user_data as manage_data
 from ..dto import TutorialList, common_response_full
 from ..managers import MissionCompleteStatus, MissionType, RewardType
-from ..rows import (YwpMstItem, YwpMstYoukai, YwpUserItem, YwpUserMap,
-                    YwpUserMission, YwpUserShopItemRemainCnt,
-                    YwpUserShopItemUnlock, YwpUserStage, YwpUserYoukai,
-                    YwpUserYoukaiBonusEffect, YwpUserYoukaiSkill, parser_for)
+from ..rng import rng
+from ..rows import (
+    YwpMstItem,
+    YwpMstYoukai,
+    YwpUserItem,
+    YwpUserMap,
+    YwpUserMission,
+    YwpUserShopItemRemainCnt,
+    YwpUserShopItemUnlock,
+    YwpUserStage,
+    YwpUserYoukai,
+    YwpUserYoukaiBonusEffect,
+    YwpUserYoukaiSkill,
+    parser_for,
+)
 from ..table_parser import TableParser
 from ..ywp_user_data import YwpUserData
 
@@ -222,7 +230,7 @@ async def login_stamp(request: web.Request) -> web.Response:
             or user_stamp.table[0][2] == "0"):
         days_since_epoch = int(time.time())
         user_stamp.table[0][0] = str(days_since_epoch)
-        user_stamp.table[0][1] = str(random.randrange(1, stamp_count))
+        user_stamp.table[0][1] = str(rng.randrange(1, stamp_count))
         user_stamp.table[0][2] = "1"
         walk = 1
     day = int(user_stamp.table[0][2])
@@ -233,7 +241,7 @@ async def login_stamp(request: web.Request) -> web.Response:
         if (int(elements[0]) == stamp_id
                 and now_epoch > int(user_stamp.table[0][0]) + 8400
                 and (day + 1) > int(elements[2])):
-            stamp_id = random.randrange(1, stamp_count)
+            stamp_id = rng.randrange(1, stamp_count)
             walk = 1
             now_epoch = int(time.time())
             user_stamp.table[0][0] = str(now_epoch)
@@ -433,8 +441,8 @@ async def use_item(request: web.Request) -> web.Response:
 async def buy_item(request: web.Request) -> web.Response:
     req = await utils.read_decrypted_request(request)
     gdkey = req.get("level5UserId")
-    goods_id = req.get("goodsId", 0)
-    goods_count = req.get("cnt", 0)
+    goods_id = validate.req_int(req, "goodsId")
+    goods_count = validate.req_int(req, "cnt")
 
     user_shop = parser_for(YwpUserShopItemUnlock,
                            await _str_table(gdkey, "ywp_user_shop_item_unlock"))

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from . import user_data as manage_data
 
@@ -74,7 +73,7 @@ class YwpUserData:
             self.codenameId = 0
 
     @classmethod
-    def from_dict(cls, d: dict) -> "YwpUserData":
+    def from_dict(cls, d: dict) -> YwpUserData:
         obj = cls()
         for key in _FIELDS:
             if key in d:
@@ -85,7 +84,7 @@ class YwpUserData:
         return {key: getattr(self, key) for key in _FIELDS}
 
     @classmethod
-    async def load(cls, gdkey: str) -> "YwpUserData | None":
+    async def load(cls, gdkey: str) -> YwpUserData | None:
         raw = await manage_data.get_ywp_user(gdkey, "ywp_user_data")
         if raw is None:
             return None
@@ -94,7 +93,7 @@ class YwpUserData:
         return obj
 
     @classmethod
-    async def from_tables(cls, tables: dict, gdkey: str | None) -> "YwpUserData | None":
+    async def from_tables(cls, tables: dict, gdkey: str | None) -> YwpUserData | None:
         raw = tables.get("ywp_user_data")
         if raw is None:
             return None
@@ -111,7 +110,7 @@ class YwpUserData:
         self.hitodama += sell_count + bonus_count
 
     async def hitodama_recover(self, gdkey: str):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         result = None
         try:
             t = await manage_data.get_ywp_user(gdkey, HITODAMA_RECOVER_TABLE)

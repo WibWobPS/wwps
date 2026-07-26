@@ -1,20 +1,47 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import functools
+import os
 import re
 import time
 
 from aiohttp import web
 
-from . import (auth, config, consts, dashboard, game_data, logging_setup,
-               metrics, security, utils)
+from . import (
+    auth,
+    config,
+    consts,
+    dashboard,
+    game_data,
+    logging_setup,
+    metrics,
+    ratelimit,
+    security,
+    utils,
+    validate,
+)
 from . import user_data as manage_data
-from .handlers import (admin, basic, friend, gacha, game, init, l5id,
-                       launching, misc, world, yokai)
+from .handlers import (
+    admin,
+    basic,
+    friend,
+    gacha,
+    game,
+    init,
+    l5id,
+    launching,
+    misc,
+    world,
+    yokai,
+)
 
 log = logging_setup.get(__name__)
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
 
 
 def _normalize_path(path: str) -> str:
@@ -34,6 +61,38 @@ async def rewrite_middleware(request: web.Request, handler):
 
 
 @web.middleware
+async def save_lock_middleware(request: web.Request, handler):
+    """Releases the per-save lock that `utils.read_decrypted_request` takes."""
+    try:
+        return await handler(request)
+    finally:
+        lock = request.get(utils.SAVE_LOCK)
+        if lock is not None and lock.locked():
+            lock.release()
+
+
+@web.middleware
+async def security_headers_middleware(request: web.Request, handler):
+    response = await handler(request)
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
+
+
+def _metric_key(request: web.Request) -> str:
+    """The registered route rather than the requested path.
+
+    `misc.default_handler` answers every unknown URL, so keying by path would
+    let anyone create unbounded metric series just by walking random URLs.
+    """
+    resource = getattr(request.match_info.route, "resource", None)
+    canonical = getattr(resource, "canonical", None)
+    if not canonical or "{tail" in canonical:
+        return metrics.UNMATCHED
+    return canonical
+
+
+@web.middleware
 async def metrics_middleware(request: web.Request, handler):
     started = time.perf_counter()
     failed = False
@@ -45,8 +104,8 @@ async def metrics_middleware(request: web.Request, handler):
         failed = True
         raise
     finally:
-        if not request.path.startswith("/dashboard"):
-            metrics.record_request(request.path,
+        if not request.path.startswith(("/dashboard", "/healthz", "/readyz")):
+            metrics.record_request(_metric_key(request),
                                    (time.perf_counter() - started) * 1000, failed)
 
 
@@ -65,15 +124,41 @@ async def error_middleware(request: web.Request, handler):
     except security.OwnershipError as ex:
         return utils.encrypted_json(consts.msg_box_response(
             str(ex), "Authentication error"), status=403)
+    except utils.MalformedRequestError:
+        metrics.incr("malformed_requests")
+        return web.Response(status=400, text="Bad request", content_type="text/plain")
+    except validate.InvalidRequestError as ex:
+        metrics.incr("invalid_requests")
+        return utils.encrypted_json(consts.msg_box_response(
+            str(ex), "Invalid request"), status=400)
+    except manage_data.MissingAccountError:
+        metrics.incr("missing_account")
+        return utils.encrypted_json(consts.msg_box_response(
+            "This account doesn't exist", "Authentication error"), status=404)
     except web.HTTPException:
         raise
     except Exception as ex:
         metrics.incr("unhandled_errors")
-        metrics.event("critical", f"{request.path}: {type(ex).__name__}: {ex}")
+        metrics.event("critical", f"{_metric_key(request)}: {type(ex).__name__}")
         log.error("unhandled error on %s", request.path, exc_info=True)
         return utils.encrypted_json(consts.msg_box_response(
             "The server hit an internal error.\nPlease try again.",
             config.server_name or "Error"), status=500)
+
+
+async def healthz(request: web.Request) -> web.Response:
+    return web.json_response({"status": "ok"})
+
+
+async def readyz(request: web.Request) -> web.Response:
+    checks = {"database": False, "game_data": bool(game_data.gamedata_cache)}
+    try:
+        checks["database"] = await manage_data.ping()
+    except Exception as ex:
+        log.debug("readiness probe: database unreachable: %s", ex)
+    ready = all(checks.values())
+    return web.json_response({"status": "ready" if ready else "not ready",
+                              "checks": checks}, status=200 if ready else 503)
 
 
 def _post(app: web.Application, path: str, fn):
@@ -81,8 +166,14 @@ def _post(app: web.Application, path: str, fn):
 
 
 def build_app() -> web.Application:
-    app = web.Application(middlewares=[rewrite_middleware, metrics_middleware,
-                                       error_middleware])
+    middlewares = [rewrite_middleware, security_headers_middleware,
+                   metrics_middleware, save_lock_middleware, error_middleware]
+    if config.rate_limit_enabled:
+        middlewares.insert(1, ratelimit.middleware)
+    app = web.Application(middlewares=middlewares)
+
+    app.router.add_get("/healthz", healthz)
+    app.router.add_get("/readyz", readyz)
 
     L5ID_BASE = "/api/v1/"
     app.router.add_get("/l5id" + L5ID_BASE + "active", l5id.active_puni)
@@ -175,17 +266,18 @@ def build_app() -> web.Application:
     _post(app, "/friendRequestAccept.nhn", friend.friend_request_accept)
     _post(app, "/friendDelete.nhn", friend.friend_delete)
 
-    if config.dashboard_enabled:
+    if config.dashboard_available():
         app.router.add_get("/dashboard", dashboard.page)
         app.router.add_get("/dashboard/data", dashboard.data)
         app.router.add_get("/dashboard/metrics", dashboard.prometheus)
 
-    app.router.add_get("/admin/stats", admin.stats)
-    app.router.add_get("/admin/players", admin.players)
-    app.router.add_get("/admin/player/{gdkey}", admin.player)
-    app.router.add_post("/admin/grant", admin.grant)
-    app.router.add_post("/admin/ban", admin.ban)
-    app.router.add_post("/admin/unban", admin.unban)
+    if config.admin_token:
+        app.router.add_get("/admin/stats", admin.stats)
+        app.router.add_get("/admin/players", admin.players)
+        app.router.add_get("/admin/player/{gdkey}", admin.player)
+        app.router.add_post("/admin/grant", admin.grant)
+        app.router.add_post("/admin/ban", admin.ban)
+        app.router.add_post("/admin/unban", admin.unban)
 
     app.router.add_route("*", "/{tail:.*}", misc.default_handler)
 
@@ -197,33 +289,43 @@ def build_app() -> web.Application:
 async def _on_startup(app: web.Application):
     await manage_data.initialize()
     await manage_data.load_bans()
+    await manage_data.ensure_admin_audit()
     metrics.event("good", "server started")
     log.info("loaded %d static game table(s)", len(game_data.gamedata_cache))
     if not config.enforce_account_ownership:
         log.warning("account ownership checks are disabled")
-    if config.dashboard_enabled:
-        guard = "token required" if config.dashboard_token else "no token set"
-        log.info("dashboard on /dashboard (%s)", guard)
+    if not config.rate_limit_enabled:
+        log.warning("rate limiting is disabled")
+    if config.dashboard_available():
+        log.info("dashboard on /dashboard, data requires X-Dashboard-Token")
+    elif config.dashboard_enabled:
+        log.warning("dashboard not served: DashboardToken is empty")
+    if not config.admin_token:
+        log.info("admin API disabled: AdminToken is empty")
 
 
 async def _on_cleanup(app: web.Application):
     log.info("stopping, flushing accounts")
     try:
-        await manage_data.shutdown()
+        await asyncio.wait_for(manage_data.shutdown(), timeout=30)
         log.info("flush complete")
+    except TimeoutError:
+        log.error("flush on shutdown timed out")
     except Exception:
         log.error("flush on shutdown failed", exc_info=True)
 
 
 def main(argv: list[str] | None = None):
-    config.static_init()
+    config.load_or_exit()
     logging_setup.configure(config.log_level)
     game_data.init()
     logging_setup.banner(config.server_name or "WWPS",
                          config.game_version or "unknown",
                          config.port, config.is_wibwob)
     app = build_app()
-    web.run_app(app, host="0.0.0.0", port=config.port,
+    # Game clients connect from the network; restrict the exposed interface at
+    # the proxy or the container's port mapping instead.
+    web.run_app(app, host="0.0.0.0", port=config.port,  # nosec B104
                 backlog=config.max_connections, print=None)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 
 from aiohttp import web
@@ -153,6 +154,8 @@ svg { display: block; width: 100%; height: 150px; overflow: visible; }
   <h1>WWPS status</h1>
   <span class="sub" id="ident"></span>
   <span class="sub" id="uptime"></span>
+  <input type="password" id="view-token" placeholder="Dashboard token"
+         autocomplete="off" style="margin-left:auto">
 </header>
 
 <section class="grid cols" style="grid-template-columns: minmax(220px, 1fr) 3fr;">
@@ -224,6 +227,14 @@ svg { display: block; width: 100%; height: 150px; overflow: visible; }
 <script>
 const tip = document.getElementById('tip');
 let latencyHistory = [];
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
+            "'": '&#39;' }[c]));
+}
+
+const viewToken = () => document.getElementById('view-token').value.trim();
 
 function fmt(n) {
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
@@ -379,7 +390,7 @@ function render(data) {
   const maxCount = top.length ? top[0].count : 1;
   document.getElementById('endpoints').innerHTML = top.length ? seriesTable(
     top.map(e => [
-      e.path,
+      esc(e.path),
       '<div class="bar-track"><div class="bar-fill" style="width:' +
         (e.count / maxCount * 100).toFixed(1) + '%"></div></div>',
       e.count, e.errors, e.p95.toFixed(0)]),
@@ -389,7 +400,7 @@ function render(data) {
 
   const counters = Object.entries(data.counters).sort((a, b) => b[1] - a[1]);
   document.getElementById('counters').innerHTML = counters.length ? seriesTable(
-    counters.map(([k, v]) => [k.replace(/_/g, ' '), fmt(v)]),
+    counters.map(([k, v]) => [esc(k.replace(/_/g, ' ')), fmt(v)]),
     [{ label: 'Counter' }, { label: 'Value', num: true }])
     : '<p class="empty">No counters yet.</p>';
 
@@ -400,7 +411,8 @@ function render(data) {
         '<li><time>' + new Date(e.ts * 1000).toLocaleTimeString() + '</time>' +
         '<span><span class="dot" style="background:' +
         (levels[e.level] || 'var(--text-muted)') + '"></span>' +
-        e.level + '</span><span>' + e.message + '</span></li>').join('') + '</ul>'
+        esc(e.level) + '</span><span>' + esc(e.message) + '</span></li>').join('') +
+      '</ul>'
     : '<p class="empty">Nothing logged yet.</p>';
 }
 
@@ -417,7 +429,13 @@ document.querySelectorAll('button[data-toggle]').forEach(btn => {
 
 async function poll() {
   try {
-    const res = await fetch('data' + location.search, { cache: 'no-store' });
+    const res = await fetch('/dashboard/data', { cache: 'no-store',
+      headers: viewToken() ? { 'X-Dashboard-Token': viewToken() } : {} });
+    if (res.status === 401) {
+      document.getElementById('uptime').textContent =
+        'enter the dashboard token';
+      return;
+    }
     if (res.ok) render(await res.json());
   } catch (err) {
     document.getElementById('uptime').textContent = 'disconnected';
@@ -437,11 +455,6 @@ async function adminFetch(path, opts) {
   if (res.status === 401) throw new Error('Unauthorized. Check the admin token.');
   if (res.status === 503) throw new Error('Admin API disabled. Set AdminToken in appsettings.');
   return res;
-}
-
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"]/g,
-    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
 async function adminSearch(term) {
@@ -556,6 +569,14 @@ document.getElementById('admin-q').addEventListener('keydown', ev => {
 });
 document.getElementById('admin-token').addEventListener('change', adminRefreshCount);
 
+['view-token', 'admin-token'].forEach(id => {
+  const input = document.getElementById(id);
+  const stored = sessionStorage.getItem(id);
+  if (stored) input.value = stored;
+  input.addEventListener('change', () => sessionStorage.setItem(id, input.value));
+});
+document.getElementById('view-token').addEventListener('change', poll);
+
 poll();
 setInterval(poll, 2000);
 </script>
@@ -564,22 +585,37 @@ setInterval(poll, 2000);
 """
 
 
+# The page itself is an empty shell; every figure on it comes from
+# /dashboard/data, which is what the token guards. Tokens travel in a header so
+# they never reach an access log or a Referer.
+CSP = ("default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+       "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'")
+
+SECURITY_HEADERS = {
+    "Content-Security-Policy": CSP,
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
+
 def _authorized(request: web.Request) -> bool:
-    if not config.dashboard_token:
-        return True
-    provided = (request.query.get("token")
-                or request.headers.get("X-Dashboard-Token"))
-    return provided == config.dashboard_token
+    token = config.dashboard_token
+    if not token:
+        return False
+    provided = request.headers.get("X-Dashboard-Token") or ""
+    return hmac.compare_digest(provided, token)
 
 
 def _deny() -> web.Response:
-    return web.Response(status=401, text="Unauthorized", content_type="text/plain")
+    return web.Response(status=401, text="Unauthorized", content_type="text/plain",
+                        headers=SECURITY_HEADERS)
 
 
 async def page(request: web.Request) -> web.Response:
-    if not _authorized(request):
-        return _deny()
-    return web.Response(text=PAGE, content_type="text/html", charset="utf-8")
+    return web.Response(text=PAGE, content_type="text/html", charset="utf-8",
+                        headers=SECURITY_HEADERS)
 
 
 async def data(request: web.Request) -> web.Response:
@@ -589,10 +625,12 @@ async def data(request: web.Request) -> web.Response:
     payload["server"] = config.server_name or "WWPS"
     payload["mode"] = "Wibble Wobble" if config.is_wibwob else "Puni Puni"
     payload["version"] = config.game_version or "unknown"
-    return web.Response(text=json.dumps(payload), content_type="application/json")
+    return web.Response(text=json.dumps(payload), content_type="application/json",
+                        headers=SECURITY_HEADERS)
 
 
 async def prometheus(request: web.Request) -> web.Response:
     if not _authorized(request):
         return _deny()
-    return web.Response(text=metrics.prometheus(), content_type="text/plain")
+    return web.Response(text=metrics.prometheus(), content_type="text/plain",
+                        headers=SECURITY_HEADERS)

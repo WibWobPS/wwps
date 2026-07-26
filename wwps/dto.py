@@ -77,7 +77,7 @@ class TutorialList:
         self.entries: list[dict] = entries if entries is not None else []
 
     @classmethod
-    def parse(cls, obj) -> "TutorialList":
+    def parse(cls, obj) -> TutorialList:
         if isinstance(obj, list):
             return cls([dict(e) for e in obj])
         if isinstance(obj, str):
@@ -132,7 +132,7 @@ class LotYoukaiInfoList:
         self.entries: list[dict] = entries if entries is not None else []
 
     @classmethod
-    def parse(cls, obj) -> "LotYoukaiInfoList":
+    def parse(cls, obj) -> LotYoukaiInfoList:
         if isinstance(obj, list):
             return cls([dict(e) for e in obj])
         if isinstance(obj, str):

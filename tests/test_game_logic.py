@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from wwps import managers
-from wwps.managers import ConditionType, MissionCompleteStatus, MissionNewStatus
+from wwps.managers import ConditionType, MissionNewStatus
 from wwps.rows import YwpUserMission, YwpUserStage, parser_for
 
 

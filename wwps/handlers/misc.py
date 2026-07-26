@@ -1,21 +1,29 @@
 from __future__ import annotations
 
 import json
-import random
+import os
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 
 from aiohttp import web
 
-from .. import auth, config, consts, game_data, managers, utils
+from .. import (
+    auth,
+    config,
+    consts,
+    game_data,
+    logging_setup,
+    metrics,
+    utils,
+    validate,
+)
 from .. import user_data as manage_data
 from ..dto import common_response_full
+from ..rng import rng
 from ..ywp_user_data import YwpUserData
-from .. import logging_setup, metrics
+from .init import init_collect_menu
 
 log = logging_setup.get(__name__)
-
-from .init import init_collect_menu
 
 
 async def _str_table(gdkey: str, table: str) -> str | None:
@@ -24,7 +32,7 @@ async def _str_table(gdkey: str, table: str) -> str | None:
 
 
 def _today_str() -> str:
-    return datetime.utcnow().strftime("%Y%m%d")
+    return datetime.now(UTC).strftime("%Y%m%d")
 
 
 async def can_do_shrine_today(gdkey: str) -> bool:
@@ -46,7 +54,7 @@ async def use_addition(request: web.Request) -> web.Response:
     res["responseDetailCode"] = 0
 
     if await can_do_shrine_today(gdkey):
-        if random.randrange(10) == 0:
+        if rng.randrange(10) == 0:
             res["responseCode"] = 0
             res["responseDetailCode"] = 0
             await manage_data.set_ywp_user(gdkey, "ywp_user_addition", True)
@@ -277,27 +285,40 @@ async def user_stage_ranking(request: web.Request) -> web.Response:
 
 async def serial_confirm(request: web.Request) -> web.Response:
     req = await utils.read_decrypted_request(request)
-    serial_code = (req.get("serialCode") or "").strip()
+    udkey = validate.req_str(req, "deviceId")
+    if not udkey:
+        return utils.encrypted_json(
+            consts.msg_box_response("It's not your account", "Error"))
+
+    attempt_key = f"device:{udkey}"
+    if auth.attempts_left(attempt_key) <= 0:
+        metrics.incr("auth_code_throttled")
+        log.warning("code redemption locked out for device %s",
+                    logging_setup.mask(udkey))
+        return utils.encrypted_json(consts.msg_box_response(
+            "Too many attempts.\nPlease try again later.", "Error"))
+
+    serial_code = validate.req_str(req, "serialCode", max_length=16).strip()
     try:
         code = int(serial_code)
     except ValueError:
         return utils.encrypted_json(consts.msg_box_response(
             "Invalid code. Needs to be all numbers", "Error"))
 
-    val = auth.code_cache.get(code)
-    if val is None:
+    redeemed = auth.redeem(code, udkey)
+    if redeemed is None:
+        auth.record_attempt(attempt_key)
+        metrics.incr("auth_code_rejected")
         return utils.encrypted_json(consts.msg_box_response(
             "Invalid or expired code", "Error"))
-    email, is_link, udkey, _expires = val
-    if udkey != req.get("deviceId"):
-        return utils.encrypted_json(
-            consts.msg_box_response("It's not your account", "Error"))
+    auth.clear_attempts(attempt_key)
+    email, is_link = redeemed
     if is_link:
-        auth.code_cache.pop(code, None)
         await manage_data.add_or_edit_email(email, udkey)
+        log.info("linked %s to device %s", logging_setup.mask(email),
+                 logging_setup.mask(udkey))
         return utils.encrypted_json(consts.msg_box_response(
             "Saves successfully linked to email.", "Success"))
-    auth.code_cache.pop(code, None)
     linked = await manage_data.get_data_by_mail(email)
     if linked is None:
         return utils.encrypted_json(consts.msg_box_response(
@@ -332,16 +353,26 @@ async def default_handler(request: web.Request) -> web.Response:
         return web.Response(status=500, text="Internal server error")
 
 
+def _script_safe_json(params: dict) -> str:
+    encoded = json.dumps(params)
+    for char, escape in (("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"),
+                         (" ", "\\u2028"), (" ", "\\u2029")):
+        encoded = encoded.replace(char, escape)
+    return encoded
+
+
 async def help_inquiry_top(request: web.Request) -> web.Response:
-    import os
     path = os.path.join(config.DATA_DOWNLOAD_DIR, "help.html")
+    if not os.path.isfile(path):
+        log.warning("help.html is not present in %s", config.DATA_DOWNLOAD_DIR)
+        raise web.HTTPNotFound()
     with open(path, encoding="utf-8") as f:
         html = f.read()
     params = {
-        "userId": request.query.get("userId", ""),
-        "appVer": request.query.get("appVer", ""),
-        "sdkVer": request.query.get("sdkVer", ""),
+        "userId": request.query.get("userId", "")[:64],
+        "appVer": request.query.get("appVer", "")[:32],
+        "sdkVer": request.query.get("sdkVer", "")[:32],
     }
-    inject = (f"<script>\nwindow.__PARAMS__ = {json.dumps(params)};\n</script>")
+    inject = f"<script>\nwindow.__PARAMS__ = {_script_safe_json(params)};\n</script>"
     return web.Response(text=inject + html, content_type="text/html",
                         charset="utf-8")

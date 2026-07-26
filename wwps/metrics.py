@@ -6,6 +6,8 @@ from collections import defaultdict, deque
 WINDOW_SECONDS = 120
 LATENCY_SAMPLES = 512
 EVENT_LOG_SIZE = 50
+MAX_TRACKED_ENDPOINTS = 256
+UNMATCHED = "<unmatched>"
 
 started_at = time.time()
 
@@ -52,6 +54,11 @@ def record_request(path: str, duration_ms: float, failed: bool):
         incr("requests_failed")
 
     _latency.append(duration_ms)
+    # Unknown paths are attacker-chosen, so anything that is not a registered
+    # route is folded into one key. Without that, a sweep of random URLs grows
+    # these three tables until the process runs out of memory.
+    if path not in _endpoint_count and len(_endpoint_count) >= MAX_TRACKED_ENDPOINTS:
+        path = UNMATCHED
     _endpoint_count[path] += 1
     _endpoint_latency[path].append(duration_ms)
     if failed:
@@ -123,6 +130,12 @@ def snapshot() -> dict:
     }
 
 
+def _label(value: str) -> str:
+    out = value.replace("\\", "\\\\").replace('"', '\\"')
+    out = out.replace("\n", " ").replace("\r", " ")
+    return out[:128]
+
+
 def prometheus() -> str:
     lines = [
         "# TYPE wwps_uptime_seconds gauge",
@@ -145,7 +158,7 @@ def prometheus() -> str:
         lines.append(f"# TYPE wwps_{name} gauge")
         lines.append(f"wwps_{name} {value}")
     for row in endpoints(50):
-        label = row["path"].replace('"', "")
+        label = _label(row["path"])
         lines.append(f'wwps_endpoint_requests_total{{path="{label}"}} {row["count"]}')
         lines.append(f'wwps_endpoint_errors_total{{path="{label}"}} {row["errors"]}')
         lines.append(f'wwps_endpoint_latency_p95_ms{{path="{label}"}} {row["p95"]}')

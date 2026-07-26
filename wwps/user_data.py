@@ -6,7 +6,7 @@ import secrets
 import time
 import uuid
 import zlib
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 
 import asyncpg
 
@@ -37,10 +37,25 @@ class Account:
 
 
 _pool: asyncpg.Pool | None = None
-_account_cache: dict[str, Account] = {}
+_account_cache: OrderedDict[str, Account] = OrderedDict()
 _account_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _device_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_request_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _flush_task: asyncio.Task | None = None
+
+
+class MissingAccountError(Exception):
+    pass
+
+
+def request_lock(gdkey: str) -> asyncio.Lock:
+    """Serializes the handling of requests that mutate one save.
+
+    Handlers read a table, await, then write it back, so two requests for the
+    same save could otherwise interleave and lose one of the two updates -
+    which on a purchase means the item is kept and the price is refunded.
+    """
+    return _request_locks[gdkey]
 
 
 async def initialize():
@@ -49,7 +64,7 @@ async def initialize():
         _pool = await asyncpg.create_pool(config.postgres_connection_string)
     except Exception as ex:
         log.critical("could not create the postgres pool: %s", ex)
-        raise SystemExit(1)
+        raise SystemExit(1) from ex
     _flush_task = asyncio.create_task(_flush_loop())
     log.info("database pool ready")
 
@@ -71,18 +86,29 @@ async def _flush_all_dirty_accounts():
     started = time.perf_counter()
     keys = list(_account_cache.keys())
     await asyncio.gather(*(_flush_account(gdkey) for gdkey in keys))
+    _sweep_locks()
     duration = (time.perf_counter() - started) * 1000
     metrics.gauge("flush_duration_ms", round(duration, 1))
     metrics.gauge("accounts_cached", len(_account_cache))
-    metrics.gauge("locks_held", len(_account_locks) + len(_device_locks))
+    metrics.gauge("locks_held", len(_account_locks) + len(_device_locks)
+                  + len(_request_locks))
     if keys:
         log.info("flushed %d cached account(s) in %.0f ms", len(keys), duration)
 
 
 def _release_locks(gdkey: str):
-    lock = _account_locks.get(gdkey)
-    if lock is not None and not lock.locked():
-        _account_locks.pop(gdkey, None)
+    for table in (_account_locks, _request_locks):
+        lock = table.get(gdkey)
+        if lock is not None and not lock.locked():
+            table.pop(gdkey, None)
+
+
+def _sweep_locks():
+    for table in (_account_locks, _device_locks, _request_locks):
+        for key in [k for k, lock in list(table.items()) if not lock.locked()]:
+            if table is not _device_locks and key in _account_cache:
+                continue
+            table.pop(key, None)
 
 
 async def _flush_account(gdkey: str):
@@ -114,12 +140,37 @@ async def shutdown():
         await _pool.close()
 
 
+async def ping() -> bool:
+    if _pool is None:
+        return False
+    return await _pool.fetchval("SELECT 1") == 1
+
+
 async def get_device_gdkeys(udkey: str) -> list[str] | None:
     gdkeys = await _pool.fetchval("SELECT gdkeys FROM device WHERE udkey = $1", udkey)
     return list(gdkeys) if gdkeys is not None else None
 
 
-def _throw_if_cache_full():
+async def _make_room():
+    """Evict clean, idle saves before refusing to admit a new one."""
+    if len(_account_cache) < config.max_cached_accounts:
+        return
+    for gdkey, account in list(_account_cache.items()):
+        if len(_account_cache) < config.max_cached_accounts:
+            return
+        if account.is_dirty:
+            continue
+        lock = _account_locks.get(gdkey)
+        if lock is not None and lock.locked():
+            continue
+        request = _request_locks.get(gdkey)
+        if request is not None and request.locked():
+            continue
+        _account_cache.pop(gdkey, None)
+        _release_locks(gdkey)
+        metrics.incr("accounts_evicted")
+    if len(_account_cache) >= config.max_cached_accounts:
+        await _flush_all_dirty_accounts()
     if len(_account_cache) >= config.max_cached_accounts:
         metrics.incr("server_full_rejections")
         raise ServerFullError()
@@ -128,8 +179,9 @@ def _throw_if_cache_full():
 async def get_account_from_gdkey(gdkey: str) -> Account | None:
     acc = _account_cache.get(gdkey)
     if acc is not None:
+        _account_cache.move_to_end(gdkey)
         return acc
-    _throw_if_cache_full()
+    await _make_room()
     row = await _pool.fetchrow(
         "SELECT gdkey, character_id, udkey, user_id, ywp_user_tables, last_lgn_time, "
         "start_date, opening_tutorial_flag FROM account WHERE gdkey = $1", gdkey)
@@ -175,41 +227,57 @@ def _generate_friend_code() -> str:
 
 
 async def new_account() -> str:
-    _throw_if_cache_full()
-    fc = _generate_friend_code()
+    await _make_room()
     acc = Account()
     acc.gdkey = str(uuid.uuid4())
     acc.ywp_user_tables = {}
     acc.last_login_time = ""
-    acc.character_id = fc
-    acc.user_id = str(zlib.crc32(fc.encode("utf-8")) & 0xFFFFFFFF)
-    await _pool.execute(
-        "INSERT INTO account (gdkey, character_id, udkey, user_id, ywp_user_tables, "
-        "last_lgn_time, start_date, opening_tutorial_flag) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        acc.gdkey, acc.character_id, acc.udkey, acc.user_id,
-        json.dumps(acc.ywp_user_tables), acc.last_login_time,
-        str(acc.start_date), acc.opening_tutorial_flag)
+    for attempt in range(8):
+        fc = _generate_friend_code()
+        acc.character_id = fc
+        acc.user_id = str(zlib.crc32(fc.encode("utf-8")) & 0xFFFFFFFF)
+        try:
+            await _pool.execute(
+                "INSERT INTO account (gdkey, character_id, udkey, user_id, "
+                "ywp_user_tables, last_lgn_time, start_date, opening_tutorial_flag) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                acc.gdkey, acc.character_id, acc.udkey, acc.user_id,
+                json.dumps(acc.ywp_user_tables), acc.last_login_time,
+                str(acc.start_date), acc.opening_tutorial_flag)
+            break
+        except asyncpg.UniqueViolationError:
+            if attempt == 7:
+                raise
+            log.warning("friend code collision, retrying")
     _account_cache[acc.gdkey] = acc
     return acc.gdkey
 
 
-async def set_ywp_user(gdkey: str, table_id: str, data):
+async def _require_account(gdkey: str) -> Account:
     account = await get_account_from_gdkey(gdkey)
+    if account is None:
+        raise MissingAccountError(gdkey)
+    if account.ywp_user_tables is None:
+        account.ywp_user_tables = {}
+    return account
+
+
+async def set_ywp_user(gdkey: str, table_id: str, data):
+    account = await _require_account(gdkey)
     async with _account_locks[gdkey]:
         account.ywp_user_tables[table_id] = data
         account.is_dirty = True
 
 
 async def set_ywp_user_dict(gdkey: str, data: dict):
-    account = await get_account_from_gdkey(gdkey)
+    account = await _require_account(gdkey)
     async with _account_locks[gdkey]:
         account.ywp_user_tables.update(data)
         account.is_dirty = True
 
 
 async def set_entire_user_data(gdkey: str, data: dict):
-    account = await get_account_from_gdkey(gdkey)
+    account = await _require_account(gdkey)
     async with _account_locks[gdkey]:
         account.ywp_user_tables = data
         account.is_dirty = True
@@ -232,20 +300,20 @@ async def _remove_gdkey_from_udkey(udkey: str, gdkey: str):
 
 async def get_ywp_user(gdkey: str, table_id: str):
     account = await get_account_from_gdkey(gdkey)
-    if account is None:
+    if account is None or account.ywp_user_tables is None:
         return None
     return account.ywp_user_tables.get(table_id)
 
 
 async def delete_ywp_user(gdkey: str, table_id: str):
-    account = await get_account_from_gdkey(gdkey)
+    account = await _require_account(gdkey)
     async with _account_locks[gdkey]:
         account.ywp_user_tables.pop(table_id, None)
         account.is_dirty = True
 
 
 async def get_entire_user_data(gdkey: str) -> dict:
-    account = await get_account_from_gdkey(gdkey)
+    account = await _require_account(gdkey)
     return account.ywp_user_tables
 
 
@@ -367,6 +435,27 @@ async def load_bans():
     for row in rows:
         _bans[row["gdkey"]] = row["reason"] or ""
     metrics.gauge("banned_accounts", len(_bans))
+
+
+async def ensure_admin_audit():
+    await _pool.execute(
+        "CREATE TABLE IF NOT EXISTS admin_audit ("
+        "id bigserial PRIMARY KEY, action text NOT NULL, gdkey text, "
+        "detail text, actor text, created_at timestamptz NOT NULL DEFAULT now())")
+
+
+async def record_admin_action(action: str, gdkey: str, detail: str, actor: str):
+    try:
+        await _pool.execute(
+            "INSERT INTO admin_audit (action, gdkey, detail, actor) "
+            "VALUES ($1, $2, $3, $4)", action, gdkey, detail, actor)
+    except Exception:
+        log.error("could not write the admin audit entry for %s", action,
+                  exc_info=True)
+
+
+def count_bans() -> int:
+    return len(_bans)
 
 
 def is_banned(gdkey: str) -> bool:

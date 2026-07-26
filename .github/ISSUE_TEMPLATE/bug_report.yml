@@ -1,0 +1,36 @@
+name: Bug report
+description: Something in the server misbehaves
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the endpoint, what the client showed, and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server log
+      description: Relevant lines. Remove gdkeys, device ids and e-mail addresses.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it runs
+      options: [Docker Compose, Docker, Bare metal]
+    validations:
+      required: true

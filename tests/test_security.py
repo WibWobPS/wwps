@@ -124,3 +124,24 @@ def test_befriend_uses_the_food_tier_bit():
 def test_befriend_check_can_be_disabled(monkeypatch):
     monkeypatch.setattr(config, "validate_befriend", False)
     assert security.befriend_allowed({}, None, "00000") is True
+
+
+@pytest.mark.asyncio
+async def test_a_result_stamped_in_the_future_is_refused():
+    request_id = str(int(time.time() * 1000) + 60_000)
+    assert security.validate_battle({"score": 1, "clearTimeSec": 1},
+                                    request_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_score_that_is_not_a_number_does_not_crash_the_check():
+    request_id = str(int(time.time() * 1000) - 10_000)
+    assert security.validate_battle({"score": "lots", "clearTimeSec": None},
+                                    request_id) is None
+
+
+def test_the_ownership_cache_is_bounded():
+    security.clear_ownership_cache()
+    for i in range(security.MAX_OWNERSHIP_CACHE + 100):
+        security._remember(f"dev-{i}", f"gd-{i}")
+    assert len(security._ownership_cache) == security.MAX_OWNERSHIP_CACHE

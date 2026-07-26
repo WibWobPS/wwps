@@ -4,9 +4,16 @@ import json
 
 from aiohttp import web
 
-from . import config, game_data, logging_setup, metrics, nhn_crypt, user_data
+from . import game_data, logging_setup, metrics, nhn_crypt, user_data
 
 log = logging_setup.get(__name__)
+
+
+SAVE_LOCK = web.RequestKey("save_lock") if hasattr(web, "RequestKey") else "save_lock"
+
+
+class MalformedRequestError(Exception):
+    pass
 
 
 def bad_request() -> web.Response:
@@ -21,10 +28,33 @@ def encrypted_json(obj, status: int = 200) -> web.Response:
 
 async def read_decrypted_request(request: web.Request) -> dict:
     from . import security
-    body = (await request.read()).decode("utf-8")
-    payload = json.loads(nhn_crypt.decrypt_request(body))
+    try:
+        body = (await request.read()).decode("utf-8")
+        payload = json.loads(nhn_crypt.decrypt_request(body))
+    except Exception as ex:
+        log.warning("could not decode a request on %s: %s", request.path, ex)
+        raise MalformedRequestError(str(ex)) from ex
+    if not isinstance(payload, dict):
+        raise MalformedRequestError("payload is not an object")
     await security.enforce_ownership(payload, request.path)
+    await _hold_save_lock(request, payload)
     return payload
+
+
+async def _hold_save_lock(request: web.Request, payload: dict):
+    """Take the save's request lock for the rest of this request.
+
+    Handlers read a table, await, then write it back. Two requests for one save
+    running at once would each read the pre-request balance, so a player could
+    spend the same Y-Money twice by firing them in parallel.
+    """
+    from . import security
+    gdkey, _ = security.extract_keys(payload)
+    if not gdkey or request.get(SAVE_LOCK) is not None:
+        return
+    lock = user_data.request_lock(gdkey)
+    await lock.acquire()
+    request[SAVE_LOCK] = lock
 
 
 async def add_tables_to_response(tables, result: dict, is_download_once: bool,

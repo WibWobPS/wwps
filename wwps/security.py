@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 
 from . import config, logging_setup, metrics
 from . import user_data as manage_data
@@ -11,9 +12,10 @@ GDKEY_FIELDS = ("level5UserId", "level5UserID", "gdkeyValue", "gdkey")
 UDKEY_FIELDS = ("deviceId", "deviceID", "udkey")
 
 CLOCK_SKEW_MS = 5000
-SCORE_GRACE = 1_000_000
+SCORE_GRACE = 100_000
+MAX_OWNERSHIP_CACHE = 20_000
 
-_ownership_cache: set[tuple[str, str]] = set()
+_ownership_cache: OrderedDict[tuple[str, str], None] = OrderedDict()
 
 
 class OwnershipError(Exception):
@@ -44,16 +46,23 @@ def extract_keys(payload: dict) -> tuple[str | None, str | None]:
     return gdkey, udkey
 
 
+def _remember(udkey: str, gdkey: str):
+    _ownership_cache[(udkey, gdkey)] = None
+    while len(_ownership_cache) > MAX_OWNERSHIP_CACHE:
+        _ownership_cache.popitem(last=False)
+
+
 async def is_owner(udkey: str, gdkey: str) -> bool:
     if (udkey, gdkey) in _ownership_cache:
+        _ownership_cache.move_to_end((udkey, gdkey))
         return True
     gdkeys = await manage_data.get_device_gdkeys(udkey)
     if gdkeys and gdkey in gdkeys:
-        _ownership_cache.add((udkey, gdkey))
+        _remember(udkey, gdkey)
         return True
     account = await manage_data.get_account_from_gdkey(gdkey)
     if account is not None and account.udkey and account.udkey == udkey:
-        _ownership_cache.add((udkey, gdkey))
+        _remember(udkey, gdkey)
         return True
     return False
 
@@ -66,18 +75,20 @@ async def enforce_ownership(payload: dict, path: str):
         return
     if manage_data.is_banned(gdkey):
         metrics.incr("banned_rejected")
-        log.warning("blocked banned account %s on %s", gdkey[:8], path)
+        log.warning("blocked banned account %s on %s", logging_setup.mask(gdkey), path)
         raise BannedError(manage_data.ban_reason(gdkey) or "This account is banned")
     if udkey is None:
         metrics.incr("auth_missing_device")
-        log.warning("no device id sent for gdkey %s on %s", gdkey[:8], path)
+        log.warning("no device id sent for gdkey %s on %s",
+                    logging_setup.mask(gdkey), path)
         raise OwnershipError("Missing device id")
     if not await is_owner(udkey, gdkey):
         metrics.incr("auth_rejected")
         metrics.event("critical",
-                      f"ownership rejected on {path} (device {udkey[:8]})")
+                      f"ownership rejected on {path} "
+                      f"(device {logging_setup.mask(udkey)})")
         log.warning("ownership rejected: device %s does not own gdkey %s on %s",
-                    udkey[:8], gdkey[:8], path)
+                    logging_setup.mask(udkey), logging_setup.mask(gdkey), path)
         raise OwnershipError("This save does not belong to this device")
 
 
@@ -89,18 +100,28 @@ def battle_elapsed_ms(request_id: str) -> int | None:
     return int(time.time() * 1000) - started
 
 
+def _number(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def validate_battle(payload: dict, request_id: str) -> str | None:
     elapsed = battle_elapsed_ms(request_id)
     if elapsed is None:
         return None
+    if elapsed < 0:
+        metrics.incr("cheat_clear_time")
+        return "battle result is stamped in the future"
 
-    clear_time = payload.get("clearTimeSec") or 0
+    clear_time = _number(payload.get("clearTimeSec"))
     if clear_time * 1000 > elapsed + CLOCK_SKEW_MS:
         metrics.incr("cheat_clear_time")
         return (f"reported clear time {clear_time}s exceeds elapsed "
                 f"{elapsed / 1000:.1f}s")
 
-    score = payload.get("score") or 0
+    score = _number(payload.get("score"))
     cap = SCORE_GRACE + int(elapsed / 1000.0) * config.max_score_per_second
     if score > cap:
         metrics.incr("cheat_score_cap")

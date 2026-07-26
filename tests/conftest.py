@@ -8,8 +8,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from wwps import config, game_data, metrics, security
+from wwps import auth, config, game_data, metrics, ratelimit, security
 from wwps import user_data as manage_data
+
+DASHBOARD_TOKEN = "dashboard-token"
+ADMIN_TOKEN = "admin-token"
 
 FAKE_TABLES = {
     "mstVersionMaster": "16774",
@@ -43,11 +46,17 @@ def game_config(tmp_path):
         "DataDownloadURL": "http://localhost/dd",
         "EnforceAccountOwnership": True,
         "ValidateBefriend": True,
+        "DashboardEnabled": True,
+        "DashboardToken": DASHBOARD_TOKEN,
+        "AdminToken": ADMIN_TOKEN,
+        "RateLimitEnabled": False,
     }))
     config.static_init(str(settings))
     game_data.gamedata_cache.clear()
     game_data.gamedata_cache.update(FAKE_TABLES)
     metrics.reset()
+    ratelimit.reset()
+    auth.reset_state()
     security.clear_ownership_cache()
     yield
 

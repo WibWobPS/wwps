@@ -2,22 +2,34 @@ from __future__ import annotations
 
 import json
 import math
-import random
 import time
 from datetime import datetime
 
-from . import config, game_data
+from . import game_data, logging_setup
 from . import user_data as manage_data
 from .dto import modi_dt
-from .rows import (PuniMstStageItem, StageConditionItem, YwpMstConflate,
-                   YwpMstGachaYoukaiChoice, YwpMstMission, YwpMstYoukai,
-                   YwpMstYoukaiBonusEffect, YwpMstYoukaiLegendRelease,
-                   YwpMstYoukaiLevel, YwpMstYoukaiLevelOpen, YwpMstYoukaiSkill,
-                   YwpMstYoukaiSkillLevel, YwpUserMap, YwpUserMission,
-                   YwpUserStage, YwpUserYoukai, YwpUserYoukaiBonusEffect,
-                   YwpUserYoukaiSkill, parser_for, skill_level_get_befriender_pt)
+from .rng import rng
+from .rows import (
+    PuniMstStageItem,
+    StageConditionItem,
+    YwpMstGachaYoukaiChoice,
+    YwpMstMission,
+    YwpMstYoukaiBonusEffect,
+    YwpMstYoukaiLegendRelease,
+    YwpMstYoukaiLevel,
+    YwpMstYoukaiLevelOpen,
+    YwpMstYoukaiSkill,
+    YwpMstYoukaiSkillLevel,
+    YwpUserMap,
+    YwpUserMission,
+    YwpUserStage,
+    YwpUserYoukai,
+    YwpUserYoukaiBonusEffect,
+    YwpUserYoukaiSkill,
+    parser_for,
+    skill_level_get_befriender_pt,
+)
 from .table_parser import TableParser
-from . import logging_setup, metrics
 
 log = logging_setup.get(__name__)
 
@@ -645,7 +657,7 @@ def _generate_lot_result(enemy_rank: int, boost: float, is_super_shrine: bool,
     if autobefriend:
         return "11111"
     return "".join(
-        '1' if random.random() < _get_befriend_weight(enemy_rank, b, boost, is_super_shrine)
+        '1' if rng.random() < _get_befriend_weight(enemy_rank, b, boost, is_super_shrine)
         else '0' for b in range(5))
 
 
@@ -709,7 +721,7 @@ def rare_enemy_get_drop(stage_id: int) -> int:
         stage_entries = [x for x in _rare_enemies
                          if x.get("Scope") == 1 and stage_id in (x.get("Params") or [])]
         for entry in stage_entries:
-            if random.randrange(100) < entry["Rate"]:
+            if rng.randrange(100) < entry["Rate"]:
                 return entry["EnemyID"]
         map_id = stage_id // 1000
         map_entry = next(
@@ -717,7 +729,7 @@ def rare_enemy_get_drop(stage_id: int) -> int:
              if x.get("Scope") == 0 and map_id in (x.get("Params") or [])
              and (not x.get("ExceptionParams") or stage_id not in x["ExceptionParams"])),
             None)
-        if map_entry is not None and random.randrange(100) < map_entry["Rate"]:
+        if map_entry is not None and rng.randrange(100) < map_entry["Rate"]:
             return map_entry["EnemyID"]
     return -1
 
@@ -732,7 +744,7 @@ def create_present(recv_user_id, all_receive: bool, bonus: bool, userdata,
         "targetUserId": None, "distItemId": reward_id, "userId": None,
         "distItemType": 0, "bodyText": body_text, "bonusYmoney": 0,
         "targetPlayerName": None, "iconType": 0, "layerName": "",
-        "distItemName": "", "seq": int(random.random() * 1_000_000_000_000),
+        "distItemName": "", "seq": int(rng.random() * 1_000_000_000_000),
         "regDtStr": None,
     }
     if bonus:
@@ -773,6 +785,8 @@ async def refresh_ywp_user_friend(gdkey: str, title_id: int, icon_id: int,
                                   last_play_dt: str):
     from .ywp_user_data import YwpUserData
     me = await YwpUserData.load(gdkey)
+    if me is None:
+        return
     my_friend_list = await manage_data.get_ywp_user(gdkey, "ywp_user_friend") or []
     for item in my_friend_list:
         target_gdkey = await manage_data.get_gdkey_from_user_id(item.get("userId") or "")
@@ -806,6 +820,8 @@ async def refresh_ywp_user_friend_rank(gdkey: str, add_stars: int, mode: int):
             element["getStar"] = element.get("getStar", 0) + stars
 
     me = await YwpUserData.load(gdkey)
+    if me is None:
+        return
     if mode == 0:
         table = "ywp_user_friend_star_rank"
     elif mode == 1:

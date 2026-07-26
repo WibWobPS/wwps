@@ -5,6 +5,10 @@ import pytest
 from wwps import config, security
 from wwps import user_data as manage_data
 
+from .conftest import ADMIN_TOKEN
+
+ADMIN_HEADER = {"X-Admin-Token": ADMIN_TOKEN}
+
 
 @pytest.fixture
 def banstore(monkeypatch):
@@ -91,7 +95,6 @@ async def test_admin_summary_missing_player(banstore):
 
 @pytest.mark.asyncio
 async def test_admin_adjust_changes_currency(banstore):
-    manage_data._account_locks  # ensure attribute exists
     result = await manage_data.admin_adjust("gd-1", ymoney_delta=1000,
                                             hitodama_delta=-1)
     assert result["ymoney"] == 3666
@@ -105,6 +108,34 @@ async def test_admin_adjust_floors_at_zero(banstore):
     assert result["ymoney"] == 0
 
 
+@pytest.fixture
+async def admin_client(banstore, monkeypatch):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from wwps import app as wwps_app
+
+    async def counts():
+        return 1
+
+    monkeypatch.setattr(manage_data, "count_accounts", counts)
+    monkeypatch.setattr(manage_data, "count_devices", counts)
+
+    async def record(action, gdkey, detail, actor):
+        audit.append((action, gdkey, detail, actor))
+
+    audit: list[tuple] = []
+    monkeypatch.setattr(manage_data, "record_admin_action", record)
+
+    application = wwps_app.build_app()
+    application.on_startup.clear()
+    application.on_cleanup.clear()
+    client = TestClient(TestServer(application))
+    await client.start_server()
+    client.audit = audit
+    yield client
+    await client.close()
+
+
 @pytest.mark.asyncio
 async def test_admin_handlers_require_a_token(monkeypatch):
     from wwps.handlers import admin
@@ -112,22 +143,69 @@ async def test_admin_handlers_require_a_token(monkeypatch):
     monkeypatch.setattr(config, "admin_token", None)
 
     class Req:
-        query = {}
-        headers = {}
+        query: dict = {}
+        headers: dict = {}
+        path = "/admin/stats"
+        remote = "127.0.0.1"
 
     resp = await admin.stats(Req())
     assert resp.status == 503
 
 
 @pytest.mark.asyncio
-async def test_admin_handlers_reject_a_wrong_token(monkeypatch):
-    from wwps.handlers import admin
+async def test_admin_rejects_a_missing_or_wrong_token(admin_client):
+    assert (await admin_client.get("/admin/stats")).status == 401
+    denied = await admin_client.get("/admin/stats",
+                                    headers={"X-Admin-Token": "wrong"})
+    assert denied.status == 401
 
-    monkeypatch.setattr(config, "admin_token", "secret")
 
-    class Req:
-        query = {"token": "wrong"}
-        headers = {}
+@pytest.mark.asyncio
+async def test_admin_does_not_accept_the_token_in_the_url(admin_client):
+    response = await admin_client.get(f"/admin/stats?token={ADMIN_TOKEN}")
+    assert response.status == 401
 
-    resp = await admin.stats(Req())
-    assert resp.status == 401
+
+@pytest.mark.asyncio
+async def test_admin_stats_with_the_header(admin_client):
+    response = await admin_client.get("/admin/stats", headers=ADMIN_HEADER)
+    assert response.status == 200
+    assert (await response.json())["banned"] == 0
+
+
+@pytest.mark.asyncio
+async def test_admin_grant_rejects_a_body_that_is_not_json(admin_client):
+    response = await admin_client.post("/admin/grant", data="{",
+                                       headers=ADMIN_HEADER)
+    assert response.status == 400
+
+
+@pytest.mark.asyncio
+async def test_admin_grant_rejects_an_amount_that_is_not_a_number(admin_client):
+    response = await admin_client.post(
+        "/admin/grant", json={"gdkey": "gd-1", "ymoney": "lots"},
+        headers=ADMIN_HEADER)
+    assert response.status == 400
+
+
+@pytest.mark.asyncio
+async def test_admin_grant_rejects_an_amount_out_of_range(admin_client):
+    response = await admin_client.post(
+        "/admin/grant", json={"gdkey": "gd-1", "ymoney": 10 ** 12},
+        headers=ADMIN_HEADER)
+    assert response.status == 400
+
+
+@pytest.mark.asyncio
+async def test_admin_actions_are_audited(admin_client, banstore):
+    granted = await admin_client.post(
+        "/admin/grant", json={"gdkey": "gd-1", "ymoney": 100},
+        headers=ADMIN_HEADER)
+    assert granted.status == 200
+    banned = await admin_client.post(
+        "/admin/ban", json={"gdkey": "gd-1", "reason": "cheating"},
+        headers=ADMIN_HEADER)
+    assert banned.status == 200
+    assert banstore["bans"]["gd-1"] == "cheating"
+    actions = [entry[0] for entry in admin_client.audit]
+    assert actions == ["grant", "ban"]

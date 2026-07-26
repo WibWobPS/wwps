@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+tests
+docs
+Tools
+.env
+appsettings.json
+Resources/*
+dataDownload/*
+!Resources/README.txt
+!dataDownload/README.txt

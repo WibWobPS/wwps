@@ -128,30 +128,87 @@ async def test_requests_are_counted(client):
 
 
 @pytest.mark.asyncio
-async def test_dashboard_serves_page_and_data(client):
-    page = await client.get("/dashboard")
-    assert page.status == 200
-    assert "WWPS status" in await page.text()
-
-    data = await client.get("/dashboard/data")
-    payload = await data.json()
-    assert payload["server"] == "WWPS test"
-    assert "series" in payload and len(payload["series"]) == 60
+async def test_health_probe_answers(client):
+    response = await client.get("/healthz")
+    assert response.status == 200
+    assert (await response.json())["status"] == "ok"
 
 
 @pytest.mark.asyncio
-async def test_dashboard_exposes_prometheus(client):
-    response = await client.get("/dashboard/metrics")
+async def test_readiness_reports_each_check(client):
+    response = await client.get("/readyz")
+    body = await response.json()
+    assert set(body["checks"]) == {"database", "game_data"}
+    assert body["checks"]["game_data"] is True
+    # No pool is open in the tests, so readiness must be a 503, not a crash.
+    assert response.status == 503
+
+
+@pytest.mark.asyncio
+async def test_probes_are_not_counted_in_the_metrics(client):
+    metrics.reset()
+    await client.get("/healthz")
+    assert metrics.snapshot()["requests_total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_unknown_paths_share_one_metric_bucket(client):
+    metrics.reset()
+    for i in range(50):
+        await call(client, f"/nope{i}.nhn", {})
+    paths = [row["path"] for row in metrics.snapshot()["endpoints"]]
+    assert paths == [metrics.UNMATCHED]
+
+
+@pytest.mark.asyncio
+async def test_a_body_that_is_not_encrypted_is_a_bad_request(client):
+    response = await client.post("/init.nhn", data="not an nhn payload")
+    assert response.status == 400
+
+
+@pytest.mark.asyncio
+async def test_responses_carry_the_baseline_security_headers(client):
+    response = await client.get("/healthz")
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+
+
+@pytest.mark.asyncio
+async def test_a_forged_host_header_cannot_redirect_clients(client, monkeypatch):
+    """The launching payload tells the client where to send everything else.
+
+    Believing X-Forwarded-Host by default lets anyone point players at their
+    own server, so it is only honoured when the operator opts in.
+    """
+    from wwps import config, game_data
+    game_data.gamedata_cache["hspLaunchingInfos"] = json.dumps(
+        {"imgServer": "http://youtube.com/dd", "lncNotices": []})
+    from wwps.handlers import launching
+    launching._template = None
+    monkeypatch.setattr(config, "public_url", None)
+    monkeypatch.setattr(config, "trust_proxy_headers", False)
+
+    response = await client.get("/getLaunchingInfos",
+                                headers={"X-Forwarded-Host": "evil.example.com"})
+    assert "evil.example.com" not in await response.text()
+
+    monkeypatch.setattr(config, "trust_proxy_headers", True)
+    launching._template = None
+    response = await client.get("/getLaunchingInfos",
+                                headers={"X-Forwarded-Host": "proxy.example.com"})
+    assert "proxy.example.com" in await response.text()
+
+
+@pytest.mark.asyncio
+async def test_the_public_url_wins_over_forwarded_headers(client, monkeypatch):
+    from wwps import config, game_data
+    game_data.gamedata_cache["hspLaunchingInfos"] = json.dumps(
+        {"imgServer": "http://youtube.com/dd", "lncNotices": []})
+    from wwps.handlers import launching
+    launching._template = None
+    monkeypatch.setattr(config, "public_url", "https://wwps.example.com")
+    monkeypatch.setattr(config, "trust_proxy_headers", True)
+    response = await client.get("/getLaunchingInfos",
+                                headers={"X-Forwarded-Host": "evil.example.com"})
     body = await response.text()
-    assert "wwps_requests_total" in body
-    assert "wwps_uptime_seconds" in body
-
-
-@pytest.mark.asyncio
-async def test_dashboard_token_is_enforced(client, monkeypatch):
-    from wwps import config
-    monkeypatch.setattr(config, "dashboard_token", "secret")
-    denied = await client.get("/dashboard")
-    assert denied.status == 401
-    allowed = await client.get("/dashboard?token=secret")
-    assert allowed.status == 200
+    assert "wwps.example.com" in body and "evil.example.com" not in body

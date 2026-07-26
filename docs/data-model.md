@@ -2,18 +2,23 @@
 
 ## PostgreSQL schema
 
-Three tables, defined in `Database/schema.sql`.
+Defined in `Database/schema.sql`, with upgrades for existing installs in
+`Database/migrations/`. Both are idempotent.
 
 ```sql
-account (gdkey PK, ywp_user_tables jsonb, last_lgn_time, opening_tutorial_flag,
-         start_date, character_id UNIQUE, user_id UNIQUE, udkey)
-device  (udkey PK, gdkeys text[])
-mail    (mail PK, "currentUdkey")
+account     (gdkey PK, ywp_user_tables jsonb, last_lgn_time,
+             opening_tutorial_flag, start_date, character_id UNIQUE,
+             user_id UNIQUE, udkey)
+device      (udkey PK, gdkeys text[])
+mail        (mail PK, "currentUdkey")
+ban         (gdkey PK, reason, banned_at)
+admin_audit (id PK, action, gdkey, detail, actor, created_at)
 ```
 
 - **gdkey** — a save file. One per character. Generated as a UUID.
-- **udkey** — a device. Owns up to three gdkeys, which is what the client's
-  account-select screen lists.
+- **udkey** — a device. Owns up to `MaxGdkeysPerDevice` gdkeys (three by
+  default), which is what the client's account-select screen lists and what
+  `create_gdkey` enforces.
 - **character_id** — the eight-character friend code (`abcdefghijklmnopqrstuvwxyz0123456789`).
 - **user_id** — CRC32 of the friend code, as a decimal string. This is the id
   other players see and the one friend requests are addressed to.
@@ -22,6 +27,13 @@ mail    (mail PK, "currentUdkey")
 
 The `mail` table only maps an email address to the device that currently owns the
 save, which is all the linking flow needs.
+
+`ban` is loaded into memory at startup and consulted on every request. Every
+administrative grant, ban and unban appends a row to `admin_audit`.
+
+Three indexes exist beyond the primary keys: `account(udkey)` for the ownership
+check and the device save list, `account(last_lgn_time desc)` for the admin
+player list, and `admin_audit(created_at desc)`.
 
 ## The account cache
 

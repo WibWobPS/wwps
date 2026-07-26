@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install ruff
+      - run: ruff check --output-format=github .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install pip-audit bandit
+      - name: Known vulnerabilities in dependencies
+        run: pip-audit -r requirements.txt -r requirements-dev.txt
+      - name: Static security scan
+        run: bandit -q -ll -r wwps
+
+  docker:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wwps
+          POSTGRES_PASSWORD: wwps
+          POSTGRES_DB: wwps
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U wwps"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: wwps:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: The image applies the schema and serves /healthz
+        run: |
+          docker run -d --name wwps-ci --network host \
+            -e WWPS_POSTGRES_CONNECTION_STRING=postgresql://wwps:wwps@127.0.0.1:5432/wwps \
+            -e WWPS_IS_WIB_WOB=true \
+            wwps:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz; then ok=1; break; fi
+            sleep 2
+          done
+          docker logs wwps-ci
+          test "${ok:-0}" = "1"
+      - name: The readiness probe reports the database
+        run: |
+          body=$(curl -sS http://127.0.0.1:8080/readyz)
+          echo "$body"
+          python -c "import json,sys; assert json.loads(sys.argv[1])['checks']['database']" "$body"
+      - if: always()
+        run: docker rm -f wwps-ci || true
